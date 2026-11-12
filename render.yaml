@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: og-iptv
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server.py"
+    envVars:
+      - key: IPTV_USER
+        value: ogdemo
+      - key: IPTV_PASSWORD
+        sync: false
