@@ -8,22 +8,24 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Discover license-marked archive movies
+      - name: Discover and diagnose archive movies
         run: python build_external_catalog.py
       - name: Validate generated JSON
-        run: python -m json.tool external_movies.json > /dev/null
-      - name: Commit feed when changed
+        run: |
+          python -m json.tool external_movies.json > /dev/null
+          python -m json.tool external_catalog_report.json > /dev/null
+      - name: Commit feed and report when changed
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add external_movies.json
+          git add external_movies.json external_catalog_report.json
           if ! git diff --cached --quiet; then
-            git commit -m 'Refresh licensed external movie catalog'
+            git commit -m 'Refresh external licensed movie discovery and diagnostics'
             git push
           fi
