@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 4.6.1: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 4.6.3: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
