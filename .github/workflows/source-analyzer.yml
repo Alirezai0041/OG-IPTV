@@ -1,5 +1,4 @@
-
-name: OG IPTV Source Analyzer
+name: OG IPTV Source Analyzer V2
 
 on:
   workflow_dispatch:
@@ -18,17 +17,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Analyze Xtream catalog
+      - name: Analyze Xtream metadata
         env:
           XTREAM_URL: ${{ secrets.XTREAM_URL }}
           XTREAM_USER: ${{ secrets.XTREAM_USER }}
           XTREAM_PASSWORD: ${{ secrets.XTREAM_PASSWORD }}
-        run: |
-          python source_analyzer.py > /dev/null
+        run: python source_analyzer_v2.py
 
       - name: Upload report
         uses: actions/upload-artifact@v4
         with:
-          name: og-source-report
-          path: og_source_report.json
+          name: og-source-report-v2
+          path: og_source_report_v2.json
           retention-days: 3
