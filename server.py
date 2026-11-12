@@ -1,199 +1,184 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.3 - public playlist validation and Xtream-compatible API."""
-import os, re, json, time, hashlib, urllib.request, urllib.parse
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+"""OG IPTV 3.4: global public playlists, verified HLS 1080p+ variants, Xtream API."""
+import os,re,json,time,hashlib,urllib.request,urllib.parse
+from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+from concurrent.futures import ThreadPoolExecutor,as_completed
+from threading import Lock,Thread
 
-HOST=os.getenv('HOST','0.0.0.0')
-PORT=int(os.getenv('PORT','8080'))
-USER=os.getenv('IPTV_USER','ogdemo')
-PASSWORD=os.getenv('IPTV_PASSWORD','change-me-now')
+HOST=os.getenv('HOST','0.0.0.0');PORT=int(os.getenv('PORT','8080'))
+USER=os.getenv('IPTV_USER','ogdemo');PASSWORD=os.getenv('IPTV_PASSWORD','change-me-now')
 PUBLIC_URL=os.getenv('PUBLIC_URL','https://og-iptv.onrender.com').rstrip('/')
-CACHE_SECONDS=int(os.getenv('CACHE_SECONDS','3600'))
-MAX_CHECKS=max(1,int(os.getenv('MAX_CHECKS','400')))
-WORKERS=max(1,min(int(os.getenv('CHECK_WORKERS','16')),20))
-SOURCES={
- 'IR':'https://iptv-org.github.io/iptv/countries/ir.m3u',
- 'FR':'https://iptv-org.github.io/iptv/countries/fr.m3u',
- 'GB':'https://iptv-org.github.io/iptv/countries/uk.m3u',
- 'US':'https://iptv-org.github.io/iptv/countries/us.m3u',
- 'DE':'https://iptv-org.github.io/iptv/countries/de.m3u',
- 'TR':'https://iptv-org.github.io/iptv/countries/tr.m3u',
- 'CH':'https://iptv-org.github.io/iptv/countries/ch.m3u',
- 'FA':'https://iptv-org.github.io/iptv/languages/fas.m3u',
- 'SP':'https://iptv-org.github.io/iptv/categories/sports.m3u',
- 'MU':'https://iptv-org.github.io/iptv/categories/music.m3u',
- 'MV':'https://iptv-org.github.io/iptv/categories/movies.m3u',
- 'CA':'https://iptv-org.github.io/iptv/countries/ca.m3u',
- 'ES':'https://iptv-org.github.io/iptv/countries/es.m3u',
- 'IT':'https://iptv-org.github.io/iptv/countries/it.m3u',
- 'IN':'https://iptv-org.github.io/iptv/countries/in.m3u',
- 'AE':'https://iptv-org.github.io/iptv/countries/ae.m3u',
- 'AF':'https://iptv-org.github.io/iptv/countries/af.m3u',
- 'PK':'https://iptv-org.github.io/iptv/countries/pk.m3u',
- 'JP':'https://iptv-org.github.io/iptv/countries/jp.m3u',
- 'KR':'https://iptv-org.github.io/iptv/countries/kr.m3u',
- 'BR':'https://iptv-org.github.io/iptv/countries/br.m3u',
- 'AR':'https://iptv-org.github.io/iptv/countries/ar.m3u',
- 'NL':'https://iptv-org.github.io/iptv/countries/nl.m3u',
- 'SE':'https://iptv-org.github.io/iptv/countries/se.m3u',
- 'NO':'https://iptv-org.github.io/iptv/countries/no.m3u',
- 'AU':'https://iptv-org.github.io/iptv/countries/au.m3u',
- 'NEWS':'https://iptv-org.github.io/iptv/categories/news.m3u',
- 'KIDS':'https://iptv-org.github.io/iptv/categories/kids.m3u',
- 'DOC':'https://iptv-org.github.io/iptv/categories/documentary.m3u',
-}
-NAMES={'IR':'🇮🇷 IRAN','FR':'🇫🇷 FRANCE','GB':'🇬🇧 UNITED KINGDOM','US':'🇺🇸 USA','DE':'🇩🇪 GERMANY','TR':'🇹🇷 TURKEY','CH':'🇨🇭 SWITZERLAND','FA':'🌐 PERSIAN','SP':'⚽ SPORTS','MU':'🎵 MUSIC','MV':'🎬 MOVIES','CA':'🇨🇦 CANADA','ES':'🇪🇸 SPAIN','IT':'🇮🇹 ITALY','IN':'🇮🇳 INDIA','AE':'🇦🇪 UAE','AF':'🇦🇫 AFGHANISTAN','PK':'🇵🇰 PAKISTAN','JP':'🇯🇵 JAPAN','KR':'🇰🇷 KOREA','BR':'🇧🇷 BRAZIL','AR':'🇦🇷 ARGENTINA','NL':'🇳🇱 NETHERLANDS','SE':'🇸🇪 SWEDEN','NO':'🇳🇴 NORWAY','AU':'🇦🇺 AUSTRALIA','NEWS':'📰 NEWS','KIDS':'🧸 KIDS','DOC':'🌍 DOCUMENTARY','AD':'🔞 ADULT 18+'}
-KEYS=list(SOURCES)+['AD']
-CATEGORIES=[{'category_id':str(i),'category_name':NAMES[k],'parent_id':0} for i,k in enumerate(KEYS,1)]
+CACHE_SECONDS=int(os.getenv('CACHE_SECONDS','21600'))
+WORKERS=max(1,min(int(os.getenv('CHECK_WORKERS','12')),24))
+MIN_HEIGHT=max(1080,int(os.getenv('MIN_HEIGHT','1080')))
+# 0 means inspect all available candidates; scans can take minutes on a free host.
+MAX_CHECKS=max(0,int(os.getenv('MAX_CHECKS','0')))
 ADULT_PLAYLIST_URL=os.getenv('ADULT_PLAYLIST_URL','').strip()
-CACHE={'at':0,'streams':[],'urls':{},'stats':{},'checking':False}
+BASE='https://iptv-org.github.io/iptv/'
+SOURCES={'COUNTRIES':BASE+'index.country.m3u','CATEGORIES':BASE+'index.category.m3u'}
+CACHE={'at':0,'streams':[],'urls':{},'stats':{},'checking':False,'error':None}
 LOCK=Lock()
+CATEGORIES=[];CAT_IDS={};LAST_ERROR=''
 
-def fetch_text(url,limit=8000000):
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.3','Accept':'*/*'})
-    with urllib.request.urlopen(req,timeout=15) as r:
-        return r.read(limit).decode('utf-8','replace')
+def request(url,timeout=9,limit=16000000):
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'*/*'})
+    with urllib.request.urlopen(req,timeout=timeout) as r:
+        return r.read(limit),r.headers.get('Content-Type',''),r.geturl()
 
-def parse_m3u(key,raw):
-    info=''; result=[]; seen=set()
-    for line in raw.splitlines():
+def parse_playlist(raw,source):
+    result=[];info=''
+    for line in raw.decode('utf-8','replace').splitlines():
         line=line.strip()
-        if line.startswith('#EXTINF:'):
-            info=line
-        elif info and line.startswith(('http://','https://')):
-            if line not in seen:
-                seen.add(line)
-                logo=re.search(r'tvg-logo="([^"]*)"',info)
-                result.append((key,info.rsplit(',',1)[-1].strip() or 'Unnamed Channel',logo.group(1) if logo else '',line))
+        if line.startswith('#EXTINF:'):info=line
+        elif info and line.startswith(('https://','http://')):
+            m=re.search(r'group-title="([^"]*)"',info)
+            group=(m.group(1).strip() if m else '') or 'OTHER'
+            name=info.rsplit(',',1)[-1].strip() or 'Unnamed'
+            logo=re.search(r'tvg-logo="([^"]*)"',info)
+            result.append((source,group,name,logo.group(1) if logo else '',line))
             info=''
     return result
 
-def check(item):
-    key,name,logo,url=item
-    # HTTP validation is only a preliminary check, not a playback guarantee.
-    try:
-        req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Range':'bytes=0-4095','Accept':'*/*'})
-        with urllib.request.urlopen(req,timeout=4) as r:
-            ctype=r.headers.get('Content-Type','').lower()
-            final=r.geturl().lower().split('?')[0]
-            sample=r.read(4096)
-            status=r.status
-        if status not in (200,206) or not sample:
-            return None
-        looks_hls=('#extm3u' in sample[:200].decode('utf-8','ignore').lower())
-        looks_media=any(x in ctype for x in ('video/','audio/','mpegurl','octet-stream','mp2t'))
-        looks_file=final.endswith(('.m3u8','.mpd','.ts','.mp4'))
-        if looks_hls or looks_media or looks_file:
-            return item
-    except Exception:
-        pass
-    return None
+def variant_urls(url,data):
+    text=data.decode('utf-8','replace')
+    if not text.lstrip('\ufeff \r\n').startswith('#EXTM3U'):return []
+    lines=text.splitlines();out=[]
+    for i,line in enumerate(lines):
+        if not line.startswith('#EXT-X-STREAM-INF:'):continue
+        m=re.search(r'RESOLUTION=(\d+)x(\d+)',line,re.I)
+        if not m or int(m.group(2))<MIN_HEIGHT:continue
+        for nextline in lines[i+1:]:
+            nextline=nextline.strip()
+            if nextline and not nextline.startswith('#'):
+                out.append((int(m.group(1)),int(m.group(2)),urllib.parse.urljoin(url,nextline)))
+                break
+    return out
 
-def load():
+def check(entry):
+    source,group,name,logo,url=entry
+    try:
+        raw,ctype,final=request(url,timeout=8,limit=262144)
+        variants=variant_urls(final,raw)
+        # Media playlists without resolution information are NOT claimed as 1080p.
+        return [(source,group,name,logo,u,w,h) for w,h,u in variants]
+    except Exception:return []
+
+def category_id(label):
+    if label not in CAT_IDS:
+        cid=str(len(CAT_IDS)+1);CAT_IDS[label]=cid
+        CATEGORIES.append({'category_id':cid,'category_name':label,'parent_id':0})
+    return CAT_IDS[label]
+
+def load(force=False):
     with LOCK:
-        if time.time()-CACHE['at']<CACHE_SECONDS:return
-        CACHE['checking']=True
+        if not force and CACHE['at'] and time.time()-CACHE['at']<CACHE_SECONDS:return
+        CACHE['checking']=True;CACHE['error']=None
         try:
-            sources=dict(SOURCES)
-            if ADULT_PLAYLIST_URL.startswith(('https://','http://')):sources['AD']=ADULT_PLAYLIST_URL
-            candidates=[]; stats={}
-            for key,url in sources.items():
+            entries=[];stats={}
+            for key,url in SOURCES.items():
                 try:
-                    entries=parse_m3u(key,fetch_text(url))
-                    stats[key]={'found':len(entries),'checked':0,'accepted':0}
-                    candidates.extend(entries)
-                except Exception as exc:
-                    stats[key]={'found':0,'checked':0,'accepted':0,'error':str(exc)[:120]}
-            groups={k:[] for k in KEYS}
-            for item in candidates:groups[item[0]].append(item)
-            selected=[]
-            while len(selected)<MAX_CHECKS and any(groups.values()):
-                for key in KEYS:
-                    if groups[key] and len(selected)<MAX_CHECKS:selected.append(groups[key].pop(0))
-            for key,_,_,_ in selected:stats[key]['checked']+=1
-            good=[]
+                    raw,_,_=request(url,timeout=25)
+                    found=parse_playlist(raw,key);entries.extend(found)
+                    stats[key]={'found':len(found),'checked':0,'accepted':0}
+                except Exception as e:stats[key]={'error':str(e)[:120]}
+            if ADULT_PLAYLIST_URL.startswith(('http://','https://')):
+                try:
+                    raw,_,_=request(ADULT_PLAYLIST_URL,timeout=25)
+                    adult=parse_playlist(raw,'ADULT')
+                    entries.extend([('ADULT','🔞 ADULT 18+',n,l,u) for _,_,n,l,u in adult])
+                    stats['ADULT']={'found':len(adult),'checked':0,'accepted':0}
+                except Exception as e:stats['ADULT']={'error':str(e)[:120]}
+            # One probe per unique source URL; preserve memberships across countries/categories.
+            byurl={}
+            for entry in entries:byurl.setdefault(entry[4],[]).append(entry)
+            unique=list(byurl)
+            if MAX_CHECKS:unique=unique[:MAX_CHECKS]
+            checked=set(unique)
+            for url in checked:
+                for source,*_ in byurl[url]:
+                    if 'checked' in stats.get(source,{}):stats[source]['checked']+=1
+            good={}
             with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-                for future in as_completed([pool.submit(check,item) for item in selected]):
-                    result=future.result()
-                    if result:good.append(result)
-            good.sort(key=lambda x:(KEYS.index(x[0]),x[1].lower()))
-            streams=[]; urls={}
-            for key,name,logo,url in good:
-                sid=(int(hashlib.sha256((key+'|'+url).encode()).hexdigest()[:8],16) & 0x7fffffff) or 1
-                while sid in urls and urls[sid] != url:
-                    sid=(sid % 0x7fffffff)+1
-                stats[key]['accepted']+=1
-                streams.append({'num':len(streams)+1,'name':name,'stream_type':'live','stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0','category_id':str(KEYS.index(key)+1),'custom_sid':'','tv_archive':0,'direct_source':url,'tv_archive_duration':0,'container_extension':'m3u8'})
+                futures={pool.submit(check,byurl[url][0]):url for url in unique}
+                for f in as_completed(futures):
+                    url=futures[f]
+                    try:variants=f.result()
+                    except Exception:variants=[]
+                    if variants:good[url]=variants
+            # Build all memberships; a channel can appear in both country and sports.
+            streams=[];urls={};CAT_IDS.clear();CATEGORIES.clear();seen=set()
+            # Always expose the adult category, even if no authorized source is configured.
+            category_id('🔞 ADULT 18+')
+            records=[]
+            for url,variants in good.items():
+                for source,group,name,logo,_ in byurl[url]:
+                    if source=='COUNTRIES':category='🌍 '+group
+                    elif source=='CATEGORIES':category='📺 '+group
+                    else:category='🔞 ADULT 18+'
+                    for _,_,_,_,variant,w,h in variants:
+                        label='4K' if h>=2160 else ('1440p' if h>=1440 else '1080p')
+                        key=(category,name,variant)
+                        if key not in seen:
+                            seen.add(key);records.append((category,name,logo,variant,w,h,label,source))
+            records.sort(key=lambda x:(x[0].casefold(),re.sub(r'\s+(?:4k|uhd|fhd|hd|1080p|1440p)$','',x[1],flags=re.I).casefold(),x[1].casefold(),-x[5]))
+            for category,name,logo,url,w,h,label,source in records:
+                cid=category_id(category)
+                sid=(int(hashlib.sha256((category+'|'+url).encode()).hexdigest()[:8],16)&0x7fffffff) or 1
+                while sid in urls and urls[sid]!=url:sid=(sid%0x7fffffff)+1
+                display=f'{name} [{label}]'
+                streams.append({'num':len(streams)+1,'name':display,'stream_type':'live','stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0','category_id':cid,'custom_sid':'','tv_archive':0,'direct_source':url,'tv_archive_duration':0,'container_extension':'m3u8'})
                 urls[sid]=url
-            CACHE.update(at=time.time(),streams=streams,urls=urls,stats=stats)
-            print('OG IPTV 3.3 checked',len(selected),'accepted',len(streams),flush=True)
-        finally:
-            CACHE['checking']=False
+                stats[source]['accepted']+=1
+            CACHE.update(at=time.time(),streams=streams,urls=urls,stats=stats,error=None)
+            print('OG IPTV 3.4 checked',len(unique),'accepted',len(streams),flush=True)
+        except Exception as e:
+            CACHE['error']=str(e);print('Scan error',repr(e),flush=True)
+        finally:CACHE['checking']=False
 
 class Handler(BaseHTTPRequestHandler):
     def reply(self,obj,status=200):
-        body=json.dumps(obj,ensure_ascii=False).encode('utf-8')
-        self.send_response(status)
-        self.send_header('Content-Type','application/json; charset=utf-8')
-        self.send_header('Cache-Control','no-store')
-        self.send_header('Content-Length',str(len(body)))
-        self.end_headers()
+        body=json.dumps(obj,ensure_ascii=False).encode()
+        self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8')
+        self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(body)));self.end_headers()
         if self.command!='HEAD':self.wfile.write(body)
-    def do_HEAD(self):
-        path=urllib.parse.urlsplit(self.path).path
-        self.reply({'ok':True} if path in ('/','/health') else {'error':'Not found'},200 if path in ('/','/health') else 404)
+    def do_HEAD(self):self.reply({'ok':True})
     def do_GET(self):
         parsed=urllib.parse.urlsplit(self.path);path=parsed.path
-        p=urllib.parse.parse_qs(parsed.query)
-        get=lambda key:p.get(key,[''])[0]
+        p=urllib.parse.parse_qs(parsed.query);get=lambda key:p.get(key,[''])[0]
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.3','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.4','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'scanning':CACHE['checking'],'scan_error':CACHE['error'],'adult_playlist_configured':bool(ADULT_PLAYLIST_URL),'minimum_verified_height':MIN_HEIGHT})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            load()
-            return self.reply({'version':'3.3','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
-        # Smarters can request /USERNAME/PASSWORD/STREAM_ID (no /live prefix).
-        # Also preserve the /live/USERNAME/PASSWORD/STREAM_ID.m3u8 route.
+            return self.reply({'version':'3.4','stats':CACHE['stats'],'accepted_total':len(CACHE['streams']),'scanning':CACHE['checking']})
         parts=path.strip('/').split('/')
-        if (len(parts)==3 or (len(parts)==4 and parts[0]=='live')):
+        if len(parts)==3 or (len(parts)==4 and parts[0]=='live'):
             try:
-                if len(parts)==3:
-                    u,pw,filename=parts
-                else:
-                    _,u,pw,filename=parts
-                if urllib.parse.unquote(u)!=USER or urllib.parse.unquote(pw)!=PASSWORD:
-                    return self.reply({'error':'Unauthorized'},401)
+                if len(parts)==3:u,pw,filename=parts
+                else:_,u,pw,filename=parts
+                if urllib.parse.unquote(u)!=USER or urllib.parse.unquote(pw)!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
                 sid=int(filename.split('.')[0])
-            except ValueError:
-                return self.reply({'error':'Invalid stream URL'},400)
-            load();target=CACHE['urls'].get(sid)
+            except ValueError:return self.reply({'error':'Invalid stream'},400)
+            target=CACHE['urls'].get(sid)
             if not target:return self.reply({'error':'Unknown stream'},404)
-            self.send_response(302)
-            self.send_header('Location',target)
-            self.send_header('Cache-Control','no-store')
-            self.end_headers()
-            return
+            self.send_response(302);self.send_header('Location',target);self.end_headers();return
         if path not in ('/player_api.php','/get.php'):return self.reply({'error':'Not found'},404)
         if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'user_info':{'auth':0,'status':'Disabled'}},401)
-        load()
         if path=='/get.php':
             lines=['#EXTM3U']
             for s in CACHE['streams']:
                 group=CATEGORIES[int(s['category_id'])-1]['category_name']
                 target=PUBLIC_URL+'/live/'+urllib.parse.quote(USER,safe='')+'/'+urllib.parse.quote(PASSWORD,safe='')+'/'+str(s['stream_id'])+'.m3u8'
                 lines.extend([f'#EXTINF:-1 tvg-logo="{s["stream_icon"]}" group-title="{group}",{s["name"]}',target])
-            body='\n'.join(lines).encode('utf-8')
-            self.send_response(200);self.send_header('Content-Type','application/x-mpegURL');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
+            body='\n'.join(lines).encode();self.send_response(200);self.send_header('Content-Type','application/x-mpegURL');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
         action=get('action')
         if action=='get_live_categories':return self.reply(CATEGORIES)
         if action=='get_live_streams':return self.reply([s for s in CACHE['streams'] if not get('category_id') or s['category_id']==get('category_id')])
         if action in ('get_vod_categories','get_vod_streams','get_series_categories','get_series'):return self.reply([])
         if action in ('get_short_epg','get_simple_data_table'):return self.reply({'epg_listings':[]})
         public=urllib.parse.urlsplit(PUBLIC_URL);secure=public.scheme=='https'
-        return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,'status':'Active','exp_date':None,'is_trial':'0','active_cons':'0','max_connections':'1','allowed_output_formats':['m3u8']},'server_info':{'url':public.hostname,'port':str(public.port or (443 if secure else 80)),'https_port':'443' if secure else '', 'server_protocol':public.scheme,'timezone':'Europe/Zurich','timestamp_now':int(time.time())}})
+        return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,'status':'Active','exp_date':None,'is_trial':'0','active_cons':'0','max_connections':'1','allowed_output_formats':['m3u8']},'server_info':{'url':public.hostname,'port':str(public.port or (443 if secure else 80)),'https_port':'443' if secure else '','server_protocol':public.scheme,'timezone':'Europe/Zurich','timestamp_now':int(time.time())}})
 
 if __name__=='__main__':
-    print('OG IPTV v3.2 running on',HOST,PORT,flush=True)
+    Thread(target=load,daemon=True).start()
+    print('OG IPTV v3.4 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
