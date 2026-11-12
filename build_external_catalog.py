@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
-"""Discover Internet Archive videos with permissive *declared* reuse licenses.
-This is metadata screening, not proof of rights or successful playback.
-Runs on GitHub Actions, not the memory-constrained IPTV server.
+"""Metadata-only discovery of language-matched, reuse-labelled Archive videos.
+Not a rights audit, playback check, or a guarantee of movie/series classification.
 """
-import concurrent.futures
 import collections
+import concurrent.futures
 import json
-import os
-from pathlib import Path
 import re
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
-OUT = Path('external_movies.json')
-REPORT = Path('external_catalog_report.json')
-MAX_ITEMS = 150
-PER_QUERY = 100
-UA = 'OG-IPTV-metadata-discovery/2.0'
+UA = 'OG-IPTV-catalog-research/3.0 (metadata discovery)'
 SEARCHES = [
-    'mediatype:movies AND (language:persian OR language:farsi OR language:fas OR language:per OR language:dari)',
-    'mediatype:movies AND (title:persian OR title:iran OR title:afghan OR subject:persian OR subject:iran)',
-    'mediatype:movies AND licenseurl:creativecommons.org/licenses/*',
-    'mediatype:movies AND licenseurl:creativecommons.org/publicdomain/*',
+    ('fa', 'mediatype:movies AND (language:persian OR language:farsi OR language:dari OR language:fas OR language:per)'),
+    ('fa', 'mediatype:movies AND (title:persian OR title:iranian OR subject:persian OR subject:iranian)'),
+    ('fr', 'mediatype:movies AND (language:french OR language:fre OR language:fra)'),
+    ('fr', 'mediatype:movies AND (subject:french OR title:français OR title:francais)'),
 ]
-# BY and BY-SA allow redistribution under conditions. ND/NC excluded: service use and
-# adaptations are context-dependent; no assumption that commercial redistribution is permitted.
 LICENSE = re.compile(r'^https?://creativecommons\.org/(?:publicdomain/(?:zero|mark)/1\.0|licenses/(?:by|by-sa)/(?:2\.0|2\.5|3\.0|4\.0))(?:/|$)', re.I)
 VIDEO_EXT = ('.mp4', '.webm', '.ogv', '.m4v')
+EXCLUDE = re.compile(r'\b(?:lecture|seminar|conference|interview|tutorial|workshop|webinar|podcast|software freedom|speech recognition|cours|conférence|entretien|tutoriel|formation|atelier|séminaire)\b|سخنرانی|آموزش|همایش|کارگاه|کنفرانس', re.I)
+SERIES = re.compile(r'\b(?:episode|ep\.?\s*\d+|season|series|s\d{1,2}e\d{1,2}|épisode|saison|série|قسمت|سریال|فصل)\b', re.I)
+FA = re.compile(r'\b(?:persian|farsi|dari|fas|per|iranian|afghan)\b|فارسی|دری|ایرانی|افغان', re.I)
+FR = re.compile(r'\b(?:french|français|francais|fra|fre)\b|فرانسوی', re.I)
+DUB = re.compile(r'\b(?:dubbed|dubbing|doublage|doublé|dub)\b|دوبله', re.I)
 
-def get(url, limit=6_000_000):
+def scalar(v):
+    return ' '.join(str(x) for x in v[:8]) if isinstance(v, list) else str(v or '')
+
+def get(url, limit=8_000_000):
     req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/json'})
     with urllib.request.urlopen(req, timeout=25) as r:
         raw = r.read(limit + 1)
@@ -36,27 +36,37 @@ def get(url, limit=6_000_000):
         raise ValueError('response too large')
     return json.loads(raw)
 
-def scalar(v):
-    if isinstance(v, list):
-        return ' '.join(str(x) for x in v[:5])
-    return str(v or '')
-
-def search(q):
-    params = urllib.parse.urlencode({'q': q, 'fl[]': ['identifier', 'title', 'language', 'subject'], 'rows': PER_QUERY, 'page': 1, 'output': 'json'}, doseq=True)
-    return get('https://archive.org/advancedsearch.php?' + params)['response']['docs']
+def search(query):
+    args = urllib.parse.urlencode({'q': query, 'fl[]': ['identifier','title','language','subject'], 'rows': 100, 'output':'json'}, doseq=True)
+    return get('https://archive.org/advancedsearch.php?' + args)['response']['docs']
 
 def inspect(doc):
     ident = scalar(doc.get('identifier')).strip()
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,150}', ident):
-        return 'bad_identifier', None
+        return 'invalid_identifier', None
     data = get('https://archive.org/metadata/' + urllib.parse.quote(ident))
     md = data.get('metadata') or {}
     if scalar(md.get('mediatype')).lower() != 'movies':
-        return 'not_movie', None
-    lic = scalar(md.get('licenseurl')).strip().split(' ')[0].rstrip('/')
-    if not LICENSE.match(lic):
+        return 'wrong_media_type', None
+    title = scalar(md.get('title') or doc.get('title')).strip()
+    language = scalar(md.get('language') or doc.get('language'))
+    subject = scalar(md.get('subject') or doc.get('subject'))
+    description = scalar(md.get('description'))[:1000]
+    if not title:
+        return 'missing_title', None
+    if EXCLUDE.search(title + ' ' + subject):
+        return 'excluded_non_entertainment', None
+    # Require language metadata, not merely a Persian/French word in the title.
+    if FA.search(language):
+        lang = 'fa'
+    elif FR.search(language):
+        lang = 'fr'
+    else:
+        return 'language_unverified', None
+    license_url = scalar(md.get('licenseurl')).strip().split(' ')[0].rstrip('/')
+    if not LICENSE.match(license_url):
         return 'license_not_eligible', None
-    files = []
+    videos = []
     for f in data.get('files') or []:
         name = scalar(f.get('name'))
         if f.get('private') or f.get('is_dark') or '/' in name.lstrip('/') or not name.lower().endswith(VIDEO_EXT):
@@ -66,75 +76,78 @@ def inspect(doc):
         except (ValueError, TypeError):
             size = 0
         if size >= 2_000_000:
-            files.append((f.get('source') == 'original', size, name))
-    if not files:
+            videos.append((f.get('source') == 'original', size, name))
+    if not videos:
         return 'no_video_file', None
-    files.sort(reverse=True)
-    title = scalar(md.get('title') or doc.get('title') or ident).strip()
-    if not title:
-        return 'no_title', None
-    lang = scalar(md.get('language') or doc.get('language'))
-    subjects = scalar(md.get('subject') or doc.get('subject'))
-    persian = bool(re.search(r'(persian|farsi|iran|afghan|dari|فارسی|ایران|افغان|دری|\bfas\b|\bper\b)', title + ' ' + lang + ' ' + subjects, re.I))
-    url = 'https://archive.org/download/' + urllib.parse.quote(ident, safe='') + '/' + urllib.parse.quote(files[0][2], safe='')
+    videos.sort(reverse=True)
+    kind = 'series' if SERIES.search(title + ' ' + subject) else 'movies'
+    dubbed = bool(DUB.search(title + ' ' + subject + ' ' + description))
     item = {
-        'title': title[:200], 'url': url,
-        'language': 'fa' if persian else lang[:60],
-        'genre': 'Persian / Iranian' if persian else 'Archive',
-        'poster': 'https://archive.org/services/img/' + urllib.parse.quote(ident, safe=''),
-        'description': ('Declared reuse license: ' + lic)[:300],
-        'source': 'Internet Archive (declared license; rights/playback unverified)',
-        'license_url': lic,
-        'license_page': 'https://archive.org/details/' + urllib.parse.quote(ident, safe='')
+        'title': title[:200],
+        'url': 'https://archive.org/download/' + urllib.parse.quote(ident) + '/' + urllib.parse.quote(videos[0][2]),
+        'language': lang,
+        'genre': ('Persian / Dari' if lang == 'fa' else 'French') + (' / Dubbed (unverified)' if dubbed else ''),
+        'poster': 'https://archive.org/services/img/' + urllib.parse.quote(ident),
+        'description': 'Declared license: ' + license_url + '. Playback and redistribution rights unverified.',
+        'source': 'Internet Archive (metadata only)',
+        'license_url': license_url,
+        'license_page': 'https://archive.org/details/' + urllib.parse.quote(ident),
     }
-    return 'accepted', item
+    return kind, item
+
+def write_json(path, value):
+    Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 def main():
-    counters = collections.Counter()
-    docs, seen = [], set()
-    for i, query in enumerate(SEARCHES, 1):
+    counts = collections.Counter()
+    docs = {}
+    for label, query in SEARCHES:
         try:
             found = search(query)
-            print(f'Search {i}: {len(found)} results', flush=True)
-            counters['search_results'] += len(found)
-            for d in found:
-                ident = scalar(d.get('identifier'))
-                if ident not in seen:
-                    seen.add(ident)
-                    docs.append(d)
-        except Exception as e:
-            counters['search_errors'] += 1
-            print(f'Search {i} FAILED: {type(e).__name__}: {str(e)[:220]}', flush=True)
-    print(f'Unique candidates: {len(docs)}', flush=True)
-    results = []
+            counts['search_results'] += len(found)
+            print(f'Search {label}: {len(found)} results', flush=True)
+            for doc in found:
+                ident = scalar(doc.get('identifier'))
+                if ident:
+                    docs.setdefault(ident, doc)
+        except Exception as exc:
+            counts['search_errors'] += 1
+            print(f'Search ERROR: {type(exc).__name__}: {str(exc)[:180]}', flush=True)
+    movies, series = [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(inspect, d) for d in docs[:350]]
+        futures = [pool.submit(inspect, doc) for doc in list(docs.values())[:400]]
         for future in concurrent.futures.as_completed(futures):
             try:
                 reason, item = future.result()
-                counters[reason] += 1
+                counts[reason] += 1
                 if item:
-                    results.append(item)
-            except Exception as e:
-                counters['metadata_errors'] += 1
-                if counters['metadata_errors'] <= 5:
-                    print(f'Metadata error: {type(e).__name__}: {str(e)[:160]}', flush=True)
-    results.sort(key=lambda x: (x['language'] != 'fa', x['title'].casefold()))
-    results = results[:MAX_ITEMS]
-    report = {'candidates': len(docs), 'accepted': len(results), 'persian_metadata': sum(x['language'] == 'fa' for x in results), 'counts': dict(counters), 'note': 'Archive license metadata is not independent proof of rights or playback. Verify before distribution.'}
-    REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                    (series if reason == 'series' else movies).append(item)
+            except Exception as exc:
+                counts['metadata_errors'] += 1
+                if counts['metadata_errors'] <= 5:
+                    print('Metadata ERROR:', type(exc).__name__, str(exc)[:160], flush=True)
+    movies.sort(key=lambda x: (x['language'], x['title'].casefold()))
+    series.sort(key=lambda x: (x['language'], x['title'].casefold()))
+    report = {
+        'version': 3, 'candidates': len(docs),
+        'accepted_movies': len(movies), 'accepted_series_candidates': len(series),
+        'persian_movies': sum(x['language'] == 'fa' for x in movies),
+        'french_movies': sum(x['language'] == 'fr' for x in movies),
+        'persian_series_candidates': sum(x['language'] == 'fa' for x in series),
+        'french_series_candidates': sum(x['language'] == 'fr' for x in series),
+        'counts': dict(counts),
+        'note': 'Metadata-based language and series classification only; dubbing, rights, playable links and episodes NOT independently verified. Do not distribute without review.'
+    }
+    write_json('external_catalog_report.json', report)
+    # Never replace a previously nonempty feed with an empty discovery run.
+    for filename, items in [('external_movies.json', movies), ('external_series_candidates.json', series)]:
+        if items:
+            write_json(filename, items)
+        elif not Path(filename).exists():
+            write_json(filename, [])
     print('DISCOVERY REPORT:', json.dumps(report, ensure_ascii=False), flush=True)
-    if not results:
-        print('NO NEW FILMS: preserving previous nonempty catalog if present.', flush=True)
-        if not OUT.exists():
-            OUT.write_text('[]\n', encoding='utf-8')
-        elif OUT.read_text(encoding='utf-8').strip() in ('', '[]'):
-            OUT.write_text('[]\n', encoding='utf-8')
-        if counters['search_errors'] == len(SEARCHES):
-            raise SystemExit('All archive searches failed; see report.')
-        return
-    OUT.write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(f'Wrote {len(results)} candidates, Persian-tagged {report["persian_metadata"]}. Playback not verified.', flush=True)
+    if counts['search_errors'] == len(SEARCHES):
+        raise SystemExit('All Archive searches failed')
 
 if __name__ == '__main__':
     main()
