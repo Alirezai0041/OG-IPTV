@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 4.2: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 4.3: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -21,7 +21,11 @@ ADULT_PLAYLIST_URL=os.getenv('ADULT_PLAYLIST_URL','').strip()
 VOD_JSON_URL=os.getenv('VOD_JSON_URL','').strip()
 SERIES_JSON_URL=os.getenv('SERIES_JSON_URL','').strip()
 ARCHIVE_DISCOVERY=os.getenv('ARCHIVE_DISCOVERY','1')=='1'
-ARCHIVE_MAX=max(0,min(int(os.getenv('ARCHIVE_MAX','60')),200))
+ARCHIVE_MAX=max(0,min(int(os.getenv('ARCHIVE_MAX','60')),500))
+REFRESH_HOURS=max(1,min(int(os.getenv('REFRESH_HOURS','24')),168))
+LICENSED_CATALOGS_URL=os.getenv('LICENSED_CATALOGS_URL','').strip()
+EXTRA_LIVE_URLS=os.getenv('EXTRA_LIVE_URLS','').strip()
+CATALOG_FEED_STATUS={}
 # Optional authorized Xtream connection. Never put these credentials in GitHub.
 XTREAM_URL=os.getenv('XTREAM_URL','').rstrip('/')
 XTREAM_USER=os.getenv('XTREAM_USER','')
@@ -167,11 +171,15 @@ def publish_live(records,stats,checked,total,done=False,error=None):
 def scan_live():
     with LOCK:
         if STATE['checking']:return
-        STATE.update(checking=True,started_at=time.time(),checked=0,total=0,error=None,stats={},streams=[],urls={},at=0)
+        STATE.update(checking=True,started_at=time.time(),checked=0,total=0,error=None,stats={})
     stats={};byurl={};records={};checked=0;total=0
     try:
         sources=dict(SOURCES)
         if valid_http(ADULT_PLAYLIST_URL):sources['ADULT']=ADULT_PLAYLIST_URL
+        # Operator-supplied, authorized M3U sources. Never guess private endpoints.
+        for n,url in enumerate(re.split(r'[\n,;]+',EXTRA_LIVE_URLS)):
+            url=url.strip()
+            if valid_http(url):sources['EXTRA_'+str(n+1)]=url
         for source,url in sources.items():
             try:
                 raw,_,_=request(url,timeout=25)
@@ -286,7 +294,7 @@ def archive_items():
                 'year':str(md.get('year') or doc.get('year') or ''),
                 'poster':'https://archive.org/services/img/'+urllib.parse.quote(ident),
                 'description':str(md.get('description') or '')[:1000],
-                'recent':False,'source':'Internet Archive public domain'}
+                'recent':False,'source':'Internet Archive public domain','license_url':lic}
     with ThreadPoolExecutor(max_workers=6) as pool:
         for f in as_completed([pool.submit(fetch_doc,d) for d in docs]):
             try:
@@ -302,6 +310,23 @@ def load_catalog(url):
     if isinstance(data,dict):return data.get('items',[])
     return []
 
+def licensed_catalog_feeds():
+    """Optional JSON manifest of licensed sources, no scraping or DRM bypass.
+
+    Example: {"movies":[{"name":"Studio","url":"https://.../movies.json"}],
+              "series":[{"name":"Studio","url":"https://.../series.json"}]}
+    """
+    if not valid_http(LICENSED_CATALOGS_URL):return {'movies':[],'series':[]}
+    data=get_json(LICENSED_CATALOGS_URL,timeout=20)
+    if not isinstance(data,dict):raise ValueError('Invalid licensed catalog manifest')
+    feeds={}
+    for kind in ('movies','series'):
+        feeds[kind]=[]
+        for item in data.get(kind,[])[:40]:
+            if isinstance(item,dict) and valid_http(item.get('url')):
+                feeds[kind].append((str(item.get('name') or 'Licensed')[:60],item['url']))
+    return feeds
+
 def scan_vod():
     with LOCK:
         if VOD['checking']:return
@@ -311,7 +336,15 @@ def scan_vod():
         try:
             discovered=archive_items();movies.extend(discovered);sources['archive']=len(discovered)
         except Exception as e:sources['archive_error']=str(e)[:160]
-        for name,url,dest in [('movies',VOD_JSON_URL,movies),('series',SERIES_JSON_URL,series)]:
+        try:
+            feeds=licensed_catalog_feeds()
+        except Exception as exc:
+            feeds={'movies':[],'series':[]}
+            sources['manifest_error']=str(exc)[:160]
+        configured=[('movies',VOD_JSON_URL,movies),('series',SERIES_JSON_URL,series)]
+        configured.extend((f'movies:{name}',url,movies) for name,url in feeds['movies'])
+        configured.extend((f'series:{name}',url,series) for name,url in feeds['series'])
+        for name,url,dest in configured:
             if valid_http(url):
                 try:
                     items=load_catalog(url)
@@ -391,6 +424,9 @@ def scan_vod():
         mc=[{'category_id':v,'category_name':k,'parent_id':0} for k,v in movie_categories.items()]
         sc=[{'category_id':v,'category_name':k,'parent_id':0} for k,v in series_categories.items()]
         with LOCK:
+            if not movie_rows and not series_rows and (VOD['movies'] or VOD['series']):
+                VOD.update(checking=False,error='All independent VOD feeds empty; keeping previous catalog',sources=sources)
+                return
             VOD.update(movies=movie_rows,movie_info=movie_info,movie_urls=movie_urls,movie_categories=mc,
                 series=series_rows,series_info=series_info,series_urls=series_urls,series_categories=sc,
                 found=len(movies)+len(series),rejected=rejected,sources=sources,at=time.time(),checking=False,error=None)
@@ -781,7 +817,7 @@ class Handler(BaseHTTPRequestHandler):
         vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
             category_lookup={str(c['category_id']):str(c['category_name']) for c in live['categories']}
-            return self.reply({'ok':True,'name':'OG IPTV','version':'4.2',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'4.3',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -804,6 +840,7 @@ class Handler(BaseHTTPRequestHandler):
                     'ready': bool(XTREAM_READY)
                 },
                 'xtream':upstream_meta,
+                'independent_sources':{'manifest_configured':bool(LICENSED_CATALOGS_URL),'movies_feed_configured':bool(VOD_JSON_URL),'series_feed_configured':bool(SERIES_JSON_URL),'extra_live_configured':bool(EXTRA_LIVE_URLS),'vod_sources':vod['sources'],'refresh_hours':REFRESH_HOURS},
                 'source_breakdown':{'live_public':len(STATE['streams']),'live_subscription':len(extra['live']),
                     'movies_subscription':len(extra['movies']),'series_subscription':len(extra['series']),
                     'bein_subscription':sum(bool(BEIN_TERMS.search(str(r.get('name','')))) for r in extra['live']),
@@ -812,7 +849,7 @@ class Handler(BaseHTTPRequestHandler):
                 'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':bool(XMLTV_URL),'xmltv_channels':len(XMLTV_STATE['channels']),'xmltv_error':XMLTV_STATE['error'],'epg_channel_ids':sum(bool(s.get('epg_channel_id')) for s in live['streams'])}})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'4.2','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'4.3','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -883,11 +920,18 @@ class Handler(BaseHTTPRequestHandler):
             'https_port':'443' if secure else '', 'server_protocol':public.scheme,
             'timezone':'Europe/Zurich','timestamp_now':int(time.time())}})
 
+def refresh_loop(fn, interval):
+    # First scan immediately; keep worker alive and refresh on schedule.
+    while True:
+        try:fn()
+        except Exception as exc:print('Refresh error',fn.__name__,type(exc).__name__,flush=True)
+        time.sleep(interval)
+
 if __name__=='__main__':
-    Thread(target=scan_live,daemon=True).start()
-    Thread(target=scan_vod,daemon=True).start()
+    Thread(target=refresh_loop,args=(scan_live,REFRESH_HOURS*3600),daemon=True).start()
+    Thread(target=refresh_loop,args=(scan_vod,REFRESH_HOURS*3600),daemon=True).start()
     if XTREAM_READY:
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v4.2 running on',HOST,PORT,flush=True)
+    print('OG IPTV v4.3 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
