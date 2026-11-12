@@ -663,4 +663,4 @@ if __name__=='__main__':
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
     print('OG IPTV v3.8 running on',HOST,PORT,flush=True)
-    ThreadingHTTPServer((HOST,PORT),Handler).serve
+    ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
