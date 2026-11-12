@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 4.3: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 4.5: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -31,8 +31,8 @@ XTREAM_URL=os.getenv('XTREAM_URL','').rstrip('/')
 XTREAM_USER=os.getenv('XTREAM_USER','')
 XTREAM_PASSWORD=os.getenv('XTREAM_PASSWORD','')
 XTREAM_ENABLED=os.getenv('XTREAM_ENABLED','0')=='1'
-XTREAM_MOVIE_LIMIT=max(0,min(int(os.getenv('XTREAM_MOVIE_LIMIT','1000')),50000))
-XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','500')),20000))
+XTREAM_MOVIE_LIMIT=max(0,min(int(os.getenv('XTREAM_MOVIE_LIMIT','100000')),120000))
+XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','25000')),30000))
 XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','1000')),30000))
 XTREAM_READY=XTREAM_ENABLED and all((XTREAM_URL,XTREAM_USER,XTREAM_PASSWORD))
 UPSTREAM={'live':{},'movie':{},'series':{}}
@@ -45,6 +45,10 @@ XMLTV_URL=os.getenv('XMLTV_URL','').strip()  # Operator-provided authorized XMLT
 XMLTV_STATE={'at':0,'channels':{},'error':None}
 XMLTV_LOCK=RLock()
 ADULT_ENABLED=os.getenv('ADULT_ENABLED','1')=='1'
+PERSIAN_RESERVE_PERCENT=max(0,min(int(os.getenv('PERSIAN_RESERVE_PERCENT','55')),90))
+ADULT_MOVIE_NAME='🔞 فیلم‌های بزرگسالان 18+'
+ADULT_SERIES_NAME='🔞 سریال‌های بزرگسالان 18+'
+PERSIAN_VOD_TERMS=re.compile(r'(?i)(?:ایران|ایرانی|فارسی|پارسی|دوبله\s*فارسی|زیرنویس\s*فارسی|iran(?:ian)?|farsi|persian|farsi\s*dubbed|persian\s*dubbed|dubbed\s*in\s*persian|افلام\s+ايراني|أفلام\s+إيرانية|مدبلج\s*فارسي)')
 ADULT_TERMS=re.compile(r'(?i)(?:\bxxx\b|\b18\s*\+\b|\badult\b|\bporn\b|\berotic\b|\bnsfw\b|\badulte\b|\bporno\b|\bsexy\b|بزرگسال|للكبار|للبالغين)')
 BEIN_TERMS=re.compile(r'(?i)(?:\bbe\s*in\s*(?:sports?|sport)?\b|\bbein\b|\bbein\s*max\b)')
 DETAIL_SEMAPHORE=BoundedSemaphore(5)
@@ -364,6 +368,8 @@ def scan_vod():
             sid=stable_id('vod|'+url)
             while sid in movie_urls and movie_urls[sid]!=url:sid=(sid%0x7fffffff)+1
             cats=category_labels(item,'VOD')
+            if ADULT_ENABLED and (item.get('adult') is True or ADULT_TERMS.search(' '.join(str(item.get(k) or '') for k in ('category','genre','rating','title')))):
+                cats=[ADULT_MOVIE_NAME]+[c for c in cats if c!=ADULT_MOVIE_NAME]
             for label in cats:movie_categories.setdefault(label,str(len(movie_categories)+1))
             year=str(item.get('year') or '')
             movie_rows.append({'num':len(movie_rows)+1,'name':title,'stream_type':'movie',
@@ -387,6 +393,8 @@ def scan_vod():
             if sid in seen:continue
             seen.add(sid)
             cats=category_labels(item,'SRS')
+            if ADULT_ENABLED and (item.get('adult') is True or ADULT_TERMS.search(' '.join(str(item.get(k) or '') for k in ('category','genre','rating','title')))):
+                cats=[ADULT_SERIES_NAME]+[c for c in cats if c!=ADULT_SERIES_NAME]
             for label in cats:series_categories.setdefault(label,str(len(series_categories)+1))
             info_seasons=[];episodes={}
             for season in seasons:
@@ -455,16 +463,16 @@ def balanced_selection(items, category_names, limit):
     # Languages with explicit source labels get early slots, but all categories participate.
     def priority(cid):
         name=str(category_names.get(cid,'')).casefold()
-        if re.search(r'persian|farsi|فارسی|ایرانی|ايراني|إيرانية|ایرانی|iran|\bfa\b|\bper\b|دوبله فارسی|هندی.*فارسی|hindi.*farsi|hindi.*persian',name):return 0
+        if PERSIAN_VOD_TERMS.search(name) or re.search(r'(?i)(?:\bfa\b|\bper\b|هندی.*فارسی|hindi.*farsi|hindi.*persian)',name):return 0
         if re.search(r'english|anglais|\ben\b|\buk\b|\busa\b|hindi|bollywood|indian',name):return 1
         if re.search(r'french|français|\bfr\b',name):return 2
         return 3
     order=sorted(buckets,key=lambda c:(priority(c),c))
     result=[]
-    # Reserve up to 18% of the cap for explicitly Persian/Iranian source categories.
+    # Reserve configurable share for explicitly Persian/Iranian source categories.
     # This is a *selection* preference; it cannot create titles absent from the provider.
     persian=[cid for cid in order if priority(cid)==0]
-    reserve=min(limit*18//100, sum(len(buckets[cid]) for cid in persian))
+    reserve=min(limit*PERSIAN_RESERVE_PERCENT//100, sum(len(buckets[cid]) for cid in persian))
     while persian and len(result)<reserve:
         more=[]
         for cid in persian:
@@ -646,7 +654,9 @@ def safe_text(value):
 def vod_group(source_name,title,kind):
     raw=str(source_name or '').strip()
     norm=raw.casefold()
-    iranian=bool(re.search(r'ایران|ایرانی|فارسی|دوبله\s*فارسی|\biran(?:ian)?\b|\bfarsi\b|\bpersian\b|افلام\s+ايراني|أفلام\s+إيرانية|مدبلج\s*فارسي',norm,re.I))
+    if ADULT_ENABLED and ADULT_TERMS.search(raw+' '+str(title or '')):
+        return ADULT_MOVIE_NAME if kind=='MOVIES' else ADULT_SERIES_NAME
+    iranian=bool(PERSIAN_VOD_TERMS.search(norm+' '+str(title or '')))
     hindi_farsi=iranian and bool(re.search(r'هند|هندی|hindi|indian|bollywood|هندي',norm,re.I))
     lang='FA' if iranian else ''
     if not lang:
@@ -817,7 +827,7 @@ class Handler(BaseHTTPRequestHandler):
         vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
             category_lookup={str(c['category_id']):str(c['category_name']) for c in live['categories']}
-            return self.reply({'ok':True,'name':'OG IPTV','version':'4.3',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'4.5',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -830,6 +840,10 @@ class Handler(BaseHTTPRequestHandler):
                 'vod_scanning':vod['checking'],'vod_error':vod['error'],
                 'movies_loaded':len(vod['movie_info']),'series_loaded':len(vod['series_info']),
                 'movie_categories_loaded':len(vod['movie_categories']),
+                'adult_movies_loaded':sum(1 for r in vod['movies'] if str(next((c.get('category_name','') for c in vod['movie_categories'] if str(c.get('category_id'))==str(r.get('category_id'))),''))==ADULT_MOVIE_NAME),
+                'persian_movie_categories':sum(1 for c in vod['movie_categories'] if PERSIAN_VOD_TERMS.search(str(c.get('category_name','')))),
+                'persian_series_categories':sum(1 for c in vod['series_categories'] if PERSIAN_VOD_TERMS.search(str(c.get('category_name','')))),
+                'persian_reserve_percent':PERSIAN_RESERVE_PERCENT,
                 'series_categories_loaded':len(vod['series_categories']),
                 'vod_last_scan':int(vod['at']),
                 'xtream_config': {
@@ -849,7 +863,7 @@ class Handler(BaseHTTPRequestHandler):
                 'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':bool(XMLTV_URL),'xmltv_channels':len(XMLTV_STATE['channels']),'xmltv_error':XMLTV_STATE['error'],'epg_channel_ids':sum(bool(s.get('epg_channel_id')) for s in live['streams'])}})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'4.3','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'4.5','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -933,5 +947,5 @@ if __name__=='__main__':
     if XTREAM_READY:
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v4.3 running on',HOST,PORT,flush=True)
+    print('OG IPTV v4.4 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
