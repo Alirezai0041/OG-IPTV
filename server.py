@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.8: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 3.9: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -8,7 +8,7 @@ No premium subscription circumvention or copyrighted catalog scraping.
 import os, re, json, time, hashlib, urllib.request, urllib.parse, urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, as_completed
-from threading import RLock, Thread
+from threading import RLock, Thread, BoundedSemaphore
 
 HOST=os.getenv('HOST','0.0.0.0'); PORT=int(os.getenv('PORT','8080'))
 USER=os.getenv('IPTV_USER','ogdemo'); PASSWORD=os.getenv('IPTV_PASSWORD','change-me-now')
@@ -33,6 +33,8 @@ XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','1000')),25000))
 XTREAM_READY=XTREAM_ENABLED and all((XTREAM_URL,XTREAM_USER,XTREAM_PASSWORD))
 UPSTREAM={'live':{},'movie':{},'series':{}}
 UPSTREAM_SERIES_IDS={}
+UPSTREAM_MOVIE_IDS={}
+DETAIL_SEMAPHORE=BoundedSemaphore(5)
 UPSTREAM_ROWS={'live':[],'live_categories':[],'movies':[],'movie_info':{},'movie_categories':[],
                'series':[],'series_info':{},'series_categories':[]}
 UPSTREAM_META={'status':'disabled','movies':0,'series':0,'live':0,'error':None}
@@ -56,7 +58,7 @@ def valid_http(url):
 
 def request(url,timeout=9,limit=16000000):
     if not valid_http(url):raise ValueError('Invalid URL')
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.8','Accept':'*/*'})
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.9','Accept':'*/*'})
     with urllib.request.urlopen(req,timeout=timeout) as r:
         return r.read(limit),r.headers.get('Content-Type',''),r.geturl()
 
@@ -99,34 +101,30 @@ def check_live(url):
         return variants
     except Exception:return []
 
-COUNTRY_CODES = {'AF':'🇦🇫','IR':'🇮🇷','FR':'🇫🇷','CH':'🇨🇭','DE':'🇩🇪','GB':'🇬🇧',
- 'UK':'🇬🇧','US':'🇺🇸','TR':'🇹🇷','IN':'🇮🇳','CA':'🇨🇦','AU':'🇦🇺','ES':'🇪🇸',
- 'IT':'🇮🇹','PT':'🇵🇹','BR':'🇧🇷','RU':'🇷🇺','JP':'🇯🇵','KR':'🇰🇷','CN':'🇨🇳',
- 'PK':'🇵🇰','AE':'🇦🇪','SA':'🇸🇦','IQ':'🇮🇶','SY':'🇸🇾','EG':'🇪🇬','MA':'🇲🇦',
- 'NL':'🇳🇱','BE':'🇧🇪','AT':'🇦🇹','SE':'🇸🇪','NO':'🇳🇴','DK':'🇩🇰','FI':'🇫🇮',
- 'PL':'🇵🇱','GR':'🇬🇷','UA':'🇺🇦','MX':'🇲🇽','AR':'🇦🇷','CO':'🇨🇴','ZA':'🇿🇦'}
-COUNTRY_NAMES={'afghanistan':'AF','iran':'IR','france':'FR','switzerland':'CH',
- 'germany':'DE','united kingdom':'GB','great britain':'GB','usa':'US',
- 'united states':'US','turkey':'TR','india':'IN','canada':'CA','australia':'AU',
- 'spain':'ES','italy':'IT','portugal':'PT','brazil':'BR','russia':'RU',
- 'japan':'JP','south korea':'KR','china':'CN','pakistan':'PK',
- 'united arab emirates':'AE','saudi arabia':'SA','iraq':'IQ','syria':'SY',
- 'egypt':'EG','morocco':'MA','netherlands':'NL','belgium':'BE','austria':'AT',
- 'sweden':'SE','norway':'NO','denmark':'DK','finland':'FI','poland':'PL',
- 'greece':'GR','ukraine':'UA','mexico':'MX','argentina':'AR',
- 'colombia':'CO','south africa':'ZA'}
+COUNTRY_NAME_TO_CODE = {'aruba': 'AW', 'afghanistan': 'AF', 'angola': 'AO', 'anguilla': 'AI', 'åland islands': 'AX', 'albania': 'AL', 'andorra': 'AD', 'united arab emirates': 'AE', 'argentina': 'AR', 'armenia': 'AM', 'american samoa': 'AS', 'antarctica': 'AQ', 'french southern territories': 'TF', 'antigua and barbuda': 'AG', 'australia': 'AU', 'austria': 'AT', 'azerbaijan': 'AZ', 'burundi': 'BI', 'belgium': 'BE', 'benin': 'BJ', 'bonaire, sint eustatius and saba': 'BQ', 'burkina faso': 'BF', 'bangladesh': 'BD', 'bulgaria': 'BG', 'bahrain': 'BH', 'bahamas': 'BS', 'bosnia and herzegovina': 'BA', 'saint barthélemy': 'BL', 'belarus': 'BY', 'belize': 'BZ', 'bermuda': 'BM', 'bolivia, plurinational state of': 'BO', 'brazil': 'BR', 'barbados': 'BB', 'brunei darussalam': 'BN', 'bhutan': 'BT', 'bouvet island': 'BV', 'botswana': 'BW', 'central african republic': 'CF', 'canada': 'CA', 'cocos (keeling) islands': 'CC', 'switzerland': 'CH', 'chile': 'CL', 'china': 'CN', "côte d'ivoire": 'CI', 'cameroon': 'CM', 'congo, the democratic republic of the': 'CD', 'congo': 'CG', 'cook islands': 'CK', 'colombia': 'CO', 'comoros': 'KM', 'cabo verde': 'CV', 'costa rica': 'CR', 'cuba': 'CU', 'curaçao': 'CW', 'christmas island': 'CX', 'cayman islands': 'KY', 'cyprus': 'CY', 'czechia': 'CZ', 'germany': 'DE', 'djibouti': 'DJ', 'dominica': 'DM', 'denmark': 'DK', 'dominican republic': 'DO', 'algeria': 'DZ', 'ecuador': 'EC', 'egypt': 'EG', 'eritrea': 'ER', 'western sahara': 'EH', 'spain': 'ES', 'estonia': 'EE', 'ethiopia': 'ET', 'finland': 'FI', 'fiji': 'FJ', 'falkland islands (malvinas)': 'FK', 'france': 'FR', 'faroe islands': 'FO', 'micronesia, federated states of': 'FM', 'gabon': 'GA', 'united kingdom': 'GB', 'georgia': 'GE', 'guernsey': 'GG', 'ghana': 'GH', 'gibraltar': 'GI', 'guinea': 'GN', 'guadeloupe': 'GP', 'gambia': 'GM', 'guinea-bissau': 'GW', 'equatorial guinea': 'GQ', 'greece': 'GR', 'grenada': 'GD', 'greenland': 'GL', 'guatemala': 'GT', 'french guiana': 'GF', 'guam': 'GU', 'guyana': 'GY', 'hong kong': 'HK', 'heard island and mcdonald islands': 'HM', 'honduras': 'HN', 'croatia': 'HR', 'haiti': 'HT', 'hungary': 'HU', 'indonesia': 'ID', 'isle of man': 'IM', 'india': 'IN', 'british indian ocean territory': 'IO', 'ireland': 'IE', 'iran, islamic republic of': 'IR', 'iraq': 'IQ', 'iceland': 'IS', 'israel': 'IL', 'italy': 'IT', 'jamaica': 'JM', 'jersey': 'JE', 'jordan': 'JO', 'japan': 'JP', 'kazakhstan': 'KZ', 'kenya': 'KE', 'kyrgyzstan': 'KG', 'cambodia': 'KH', 'kiribati': 'KI', 'saint kitts and nevis': 'KN', 'korea, republic of': 'KR', 'kuwait': 'KW', "lao people's democratic republic": 'LA', 'lebanon': 'LB', 'liberia': 'LR', 'libya': 'LY', 'saint lucia': 'LC', 'liechtenstein': 'LI', 'sri lanka': 'LK', 'lesotho': 'LS', 'lithuania': 'LT', 'luxembourg': 'LU', 'latvia': 'LV', 'macao': 'MO', 'saint martin (french part)': 'MF', 'morocco': 'MA', 'monaco': 'MC', 'moldova, republic of': 'MD', 'madagascar': 'MG', 'maldives': 'MV', 'mexico': 'MX', 'marshall islands': 'MH', 'north macedonia': 'MK', 'mali': 'ML', 'malta': 'MT', 'myanmar': 'MM', 'montenegro': 'ME', 'mongolia': 'MN', 'northern mariana islands': 'MP', 'mozambique': 'MZ', 'mauritania': 'MR', 'montserrat': 'MS', 'martinique': 'MQ', 'mauritius': 'MU', 'malawi': 'MW', 'malaysia': 'MY', 'mayotte': 'YT', 'namibia': 'NA', 'new caledonia': 'NC', 'niger': 'NE', 'norfolk island': 'NF', 'nigeria': 'NG', 'nicaragua': 'NI', 'niue': 'NU', 'netherlands': 'NL', 'norway': 'NO', 'nepal': 'NP', 'nauru': 'NR', 'new zealand': 'NZ', 'oman': 'OM', 'pakistan': 'PK', 'panama': 'PA', 'pitcairn': 'PN', 'peru': 'PE', 'philippines': 'PH', 'palau': 'PW', 'papua new guinea': 'PG', 'poland': 'PL', 'puerto rico': 'PR', "korea, democratic people's republic of": 'KP', 'portugal': 'PT', 'paraguay': 'PY', 'palestine, state of': 'PS', 'french polynesia': 'PF', 'qatar': 'QA', 'réunion': 'RE', 'romania': 'RO', 'russian federation': 'RU', 'rwanda': 'RW', 'saudi arabia': 'SA', 'sudan': 'SD', 'senegal': 'SN', 'singapore': 'SG', 'south georgia and the south sandwich islands': 'GS', 'saint helena, ascension and tristan da cunha': 'SH', 'svalbard and jan mayen': 'SJ', 'solomon islands': 'SB', 'sierra leone': 'SL', 'el salvador': 'SV', 'san marino': 'SM', 'somalia': 'SO', 'saint pierre and miquelon': 'PM', 'serbia': 'RS', 'south sudan': 'SS', 'sao tome and principe': 'ST', 'suriname': 'SR', 'slovakia': 'SK', 'slovenia': 'SI', 'sweden': 'SE', 'eswatini': 'SZ', 'sint maarten (dutch part)': 'SX', 'seychelles': 'SC', 'syrian arab republic': 'SY', 'turks and caicos islands': 'TC', 'chad': 'TD', 'togo': 'TG', 'thailand': 'TH', 'tajikistan': 'TJ', 'tokelau': 'TK', 'turkmenistan': 'TM', 'timor-leste': 'TL', 'tonga': 'TO', 'trinidad and tobago': 'TT', 'tunisia': 'TN', 'türkiye': 'TR', 'tuvalu': 'TV', 'taiwan, province of china': 'TW', 'tanzania, united republic of': 'TZ', 'uganda': 'UG', 'ukraine': 'UA', 'united states minor outlying islands': 'UM', 'uruguay': 'UY', 'united states': 'US', 'uzbekistan': 'UZ', 'holy see (vatican city state)': 'VA', 'saint vincent and the grenadines': 'VC', 'venezuela, bolivarian republic of': 'VE', 'virgin islands, british': 'VG', 'virgin islands, u.s.': 'VI', 'viet nam': 'VN', 'vanuatu': 'VU', 'wallis and futuna': 'WF', 'samoa': 'WS', 'yemen': 'YE', 'south africa': 'ZA', 'zambia': 'ZM', 'zimbabwe': 'ZW', 'islamic republic of afghanistan': 'AF', 'republic of angola': 'AO', 'republic of albania': 'AL', 'principality of andorra': 'AD', 'argentine republic': 'AR', 'republic of armenia': 'AM', 'republic of austria': 'AT', 'republic of azerbaijan': 'AZ', 'republic of burundi': 'BI', 'kingdom of belgium': 'BE', 'republic of benin': 'BJ', "people's republic of bangladesh": 'BD', 'republic of bulgaria': 'BG', 'kingdom of bahrain': 'BH', 'commonwealth of the bahamas': 'BS', 'republic of bosnia and herzegovina': 'BA', 'republic of belarus': 'BY', 'plurinational state of bolivia': 'BO', 'bolivia': 'BO', 'federative republic of brazil': 'BR', 'kingdom of bhutan': 'BT', 'republic of botswana': 'BW', 'swiss confederation': 'CH', 'republic of chile': 'CL', "people's republic of china": 'CN', "republic of côte d'ivoire": 'CI', 'republic of cameroon': 'CM', 'republic of the congo': 'CG', 'republic of colombia': 'CO', 'union of the comoros': 'KM', 'republic of cabo verde': 'CV', 'republic of costa rica': 'CR', 'republic of cuba': 'CU', 'republic of cyprus': 'CY', 'czech republic': 'CZ', 'federal republic of germany': 'DE', 'republic of djibouti': 'DJ', 'commonwealth of dominica': 'DM', 'kingdom of denmark': 'DK', "people's democratic republic of algeria": 'DZ', 'republic of ecuador': 'EC', 'arab republic of egypt': 'EG', 'the state of eritrea': 'ER', 'kingdom of spain': 'ES', 'republic of estonia': 'EE', 'federal democratic republic of ethiopia': 'ET', 'republic of finland': 'FI', 'republic of fiji': 'FJ', 'french republic': 'FR', 'federated states of micronesia': 'FM', 'gabonese republic': 'GA', 'united kingdom of great britain and northern ireland': 'GB', 'republic of ghana': 'GH', 'republic of guinea': 'GN', 'republic of the gambia': 'GM', 'republic of guinea-bissau': 'GW', 'republic of equatorial guinea': 'GQ', 'hellenic republic': 'GR', 'republic of guatemala': 'GT', 'republic of guyana': 'GY', 'hong kong special administrative region of china': 'HK', 'republic of honduras': 'HN', 'republic of croatia': 'HR', 'republic of haiti': 'HT', 'republic of indonesia': 'ID', 'republic of india': 'IN', 'islamic republic of iran': 'IR', 'iran': 'IR', 'republic of iraq': 'IQ', 'republic of iceland': 'IS', 'state of israel': 'IL', 'italian republic': 'IT', 'hashemite kingdom of jordan': 'JO', 'republic of kazakhstan': 'KZ', 'republic of kenya': 'KE', 'kyrgyz republic': 'KG', 'kingdom of cambodia': 'KH', 'republic of kiribati': 'KI', 'south korea': 'KR', 'state of kuwait': 'KW', 'laos': 'LA', 'lebanese republic': 'LB', 'republic of liberia': 'LR', 'principality of liechtenstein': 'LI', 'democratic socialist republic of sri lanka': 'LK', 'kingdom of lesotho': 'LS', 'republic of lithuania': 'LT', 'grand duchy of luxembourg': 'LU', 'republic of latvia': 'LV', 'macao special administrative region of china': 'MO', 'kingdom of morocco': 'MA', 'principality of monaco': 'MC', 'republic of moldova': 'MD', 'moldova': 'MD', 'republic of madagascar': 'MG', 'republic of maldives': 'MV', 'united mexican states': 'MX', 'republic of the marshall islands': 'MH', 'republic of north macedonia': 'MK', 'republic of mali': 'ML', 'republic of malta': 'MT', 'republic of myanmar': 'MM', 'commonwealth of the northern mariana islands': 'MP', 'republic of mozambique': 'MZ', 'islamic republic of mauritania': 'MR', 'republic of mauritius': 'MU', 'republic of malawi': 'MW', 'republic of namibia': 'NA', 'republic of the niger': 'NE', 'federal republic of nigeria': 'NG', 'republic of nicaragua': 'NI', 'kingdom of the netherlands': 'NL', 'kingdom of norway': 'NO', 'federal democratic republic of nepal': 'NP', 'republic of nauru': 'NR', 'sultanate of oman': 'OM', 'islamic republic of pakistan': 'PK', 'republic of panama': 'PA', 'republic of peru': 'PE', 'republic of the philippines': 'PH', 'republic of palau': 'PW', 'independent state of papua new guinea': 'PG', 'republic of poland': 'PL', "democratic people's republic of korea": 'KP', 'north korea': 'KP', 'portuguese republic': 'PT', 'republic of paraguay': 'PY', 'the state of palestine': 'PS', 'state of qatar': 'QA', 'rwandese republic': 'RW', 'kingdom of saudi arabia': 'SA', 'republic of the sudan': 'SD', 'republic of senegal': 'SN', 'republic of singapore': 'SG', 'republic of sierra leone': 'SL', 'republic of el salvador': 'SV', 'republic of san marino': 'SM', 'federal republic of somalia': 'SO', 'republic of serbia': 'RS', 'republic of south sudan': 'SS', 'democratic republic of sao tome and principe': 'ST', 'republic of suriname': 'SR', 'slovak republic': 'SK', 'republic of slovenia': 'SI', 'kingdom of sweden': 'SE', 'kingdom of eswatini': 'SZ', 'republic of seychelles': 'SC', 'syria': 'SY', 'republic of chad': 'TD', 'togolese republic': 'TG', 'kingdom of thailand': 'TH', 'republic of tajikistan': 'TJ', 'democratic republic of timor-leste': 'TL', 'kingdom of tonga': 'TO', 'republic of trinidad and tobago': 'TT', 'republic of tunisia': 'TN', 'republic of türkiye': 'TR', 'taiwan': 'TW', 'united republic of tanzania': 'TZ', 'tanzania': 'TZ', 'republic of uganda': 'UG', 'eastern republic of uruguay': 'UY', 'united states of america': 'US', 'republic of uzbekistan': 'UZ', 'bolivarian republic of venezuela': 'VE', 'venezuela': 'VE', 'british virgin islands': 'VG', 'virgin islands of the united states': 'VI', 'socialist republic of viet nam': 'VN', 'vietnam': 'VN', 'republic of vanuatu': 'VU', 'independent state of samoa': 'WS', 'republic of yemen': 'YE', 'republic of south africa': 'ZA', 'republic of zambia': 'ZM', 'republic of zimbabwe': 'ZW', 'usa': 'US', 'uk': 'GB', 'england': 'GB', 'russia': 'RU', 'turkey': 'TR', 'palestine': 'PS', 'ivory coast': 'CI', 'uae': 'AE', 'kosovo': 'XK'}
+
+def country_flag(code):
+    code=str(code or '').upper()
+    if len(code)!=2 or not code.isalpha() or code=='XK':return '🇽🇰' if code=='XK' else ''
+    return ''.join(chr(127397+ord(c)) for c in code)
+
 def flag_label(label):
     name=str(label or '').strip()
     if not name:return 'OTHER'
-    if any(ch in name for ch in COUNTRY_CODES.values()):return name
+    if any(0x1f1e6<=ord(ch)<=0x1f1ff for ch in name):return name
     plain=re.sub(r'^[^\w]+','',name).strip()
-    m=re.match(r'^([A-Za-z]{2})(?:\s*[-|:]|$)',plain)
-    code=m.group(1).upper() if m else COUNTRY_NAMES.get(plain.casefold())
+    norm=plain.casefold().replace('_',' ').strip()
+    code=None
+    m=re.match(r'^([A-Za-z]{2})(?=\s*[-|:]|\s|$)',plain)
+    if m and (m.group(1).upper() in ISO_COUNTRY_CODES):code=m.group(1).upper()
     if not code:
-        for country,cc in COUNTRY_NAMES.items():
-            if plain.casefold().startswith(country+' ') or plain.casefold().startswith(country+' -'):
-                code=cc;break
-    return (COUNTRY_CODES.get(code,'')+' '+name).strip() if code in COUNTRY_CODES else name
+        for country in sorted(COUNTRY_NAME_TO_CODE,key=len,reverse=True):
+            if norm==country or norm.startswith(country+' ') or norm.startswith(country+' -') or norm.startswith(country+' |'):
+                code=COUNTRY_NAME_TO_CODE[country];break
+    flag=country_flag(code)
+    return (flag+' '+name) if flag else name
+
+ISO_COUNTRY_CODES = ['AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AW', 'AX', 'AZ', 'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BL', 'BM', 'BN', 'BO', 'BQ', 'BR', 'BS', 'BT', 'BV', 'BW', 'BY', 'BZ', 'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN', 'CO', 'CR', 'CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO', 'DZ', 'EC', 'EE', 'EG', 'EH', 'ER', 'ES', 'ET', 'FI', 'FJ', 'FK', 'FM', 'FO', 'FR', 'GA', 'GB', 'GD', 'GE', 'GF', 'GG', 'GH', 'GI', 'GL', 'GM', 'GN', 'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM', 'HN', 'HR', 'HT', 'HU', 'ID', 'IE', 'IL', 'IM', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JE', 'JM', 'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY', 'KZ', 'LA', 'LB', 'LC', 'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY', 'MA', 'MC', 'MD', 'ME', 'MF', 'MG', 'MH', 'MK', 'ML', 'MM', 'MN', 'MO', 'MP', 'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA', 'NC', 'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA', 'PE', 'PF', 'PG', 'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW', 'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW', 'SA', 'SB', 'SC', 'SD', 'SE', 'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS', 'ST', 'SV', 'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL', 'TM', 'TN', 'TO', 'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI', 'VN', 'VU', 'WF', 'WS', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW']
 
 def category_for(entry):
     if entry[0]=='ADULT':return ADULT_NAME
@@ -424,15 +422,17 @@ def xtream_catalog():
                 if ext not in ('mp4','mkv','avi','ts'):continue
                 sid=stable_id('xtream-movie|'+str(upstream_id))
                 while sid in murls:sid=(sid%0x7fffffff)+1
-                group='POWERDINO | '+flag_label(movie_names.get(str(item.get('category_id')),'MOVIES'))
+                group=vod_group(movie_names.get(str(item.get('category_id')),'MOVIES'),title,'MOVIES')
                 mcats.setdefault(group,str(800000+len(mcats)))
                 mrows.append({'num':len(mrows)+1,'name':title,'stream_type':'movie','stream_id':sid,
                     'stream_icon':item.get('stream_icon',''),'rating':'','rating_5based':0,
                     'added':str(item.get('added','0')),'category_id':mcats[group],
                     'container_extension':ext,'custom_sid':'','direct_source':''})
                 minfo[sid]={'info':{'name':title,'movie_image':item.get('stream_icon',''),
-                    'plot':'','genre':'','releasedate':'','rating':''},
+                    'plot':str(item.get('plot') or ''),'genre':str(item.get('genre') or ''),
+                    'releasedate':str(item.get('releaseDate') or ''),'rating':str(item.get('rating') or '')},
                     'movie_data':{'stream_id':sid,'name':title,'container_extension':ext}}
+                UPSTREAM_MOVIE_IDS[sid]=upstream_id
                 murls[sid]=('movie',upstream_id,ext)
             except (KeyError,ValueError,TypeError):continue
         for item in series[:XTREAM_SERIES_LIMIT]:
@@ -440,7 +440,7 @@ def xtream_catalog():
                 upstream_id=int(item['series_id']);title=str(item.get('name','')).strip()
                 if not title:continue
                 sid=stable_id('xtream-series|'+str(upstream_id))
-                group='POWERDINO | '+flag_label(series_names.get(str(item.get('category_id')),'SERIES'))
+                group=vod_group(series_names.get(str(item.get('category_id')),'SERIES'),title,'SERIES')
                 scats.setdefault(group,str(810000+len(scats)))
                 # Load seasons and episodes on demand to avoid thousands of requests at startup.
                 sinfo[sid]=None
@@ -450,7 +450,13 @@ def xtream_catalog():
                     'genre':item.get('genre',''),'releaseDate':item.get('releaseDate',''),
                     'rating':item.get('rating',''),'category_id':scats[group]})
             except (ValueError,KeyError,TypeError):continue
-        for item in live[:XTREAM_LIVE_LIMIT]:
+        # Put sports channels first when a catalog cap is configured; no streams are fabricated.
+        def live_priority(item):
+            name=str(item.get('name','')).casefold()
+            group=str(live_names.get(str(item.get('category_id')),'')).casefold()
+            return 0 if re.search(r'be\s*in\s*sports?|canal\s*\+|rmc\s*sport',name+' '+group) else 1
+        selected_live=sorted(live,key=live_priority)[:XTREAM_LIVE_LIMIT]
+        for item in selected_live:
             try:
                 upstream_id=int(item['stream_id']);title=str(item.get('name','')).strip()
                 if not title:continue
@@ -481,37 +487,109 @@ def xtream_catalog():
         print('Xtream catalog error',type(exc).__name__,flush=True)
 
 
-def series_details(sid):
-    # Server-side mapping is derived from published series rows (never from a client URL).
-    upstream_id=None
+def safe_text(value):
+    if isinstance(value,(dict,list)):return ''
+    return str(value or '')
+
+def vod_group(source_name,title,kind):
+    raw=str(source_name or '').strip()
+    combined=raw+' '+str(title or '')
+    lang=''
+    for pattern in (r'\[([A-Za-z]{2,3})\]',r'(?<![A-Za-z])(?:FR|EN|DE|FA|AR|ES|IT|TR|PT|RU|HI)(?![A-Za-z])'):
+        m=re.search(pattern,raw,re.I)
+        if m:
+            lang=language_code(m.group(1) if m.lastindex else m.group(0));break
+    if not lang:
+        for word,code in [('french','FR'),('français','FR'),('english','EN'),('anglais','EN'),('german','DE'),('deutsch','DE'),('persian','FA'),('farsi','FA'),('arabic','AR'),('spanish','ES'),('turkish','TR')]:
+            if word in raw.casefold():lang=code;break
+    genre=genre_name(combined)
+    if not lang:lang='UND'
+    # Use actual upstream classification when available, not invented language/genre.
+    if genre=='OTHER' and lang=='UND':return kind+' | '+raw
+    return kind+' | '+genre+' ['+lang+']'+(' | '+raw if genre=='OTHER' else '')
+
+def movie_details(sid):
     with LOCK:
-        if sid in UPSTREAM_ROWS['series_info'] and UPSTREAM_ROWS['series_info'][sid] is not None:
-            return UPSTREAM_ROWS['series_info'][sid]
+        base=UPSTREAM_ROWS['movie_info'].get(sid)
+        upstream_id=UPSTREAM_MOVIE_IDS.get(sid)
+        if not base or upstream_id is None:return base or {}
+        if base.get('_loaded'):return {k:v for k,v in base.items() if k!='_loaded'}
+    try:
+        with DETAIL_SEMAPHORE:details=xtream_api('get_vod_info',vod_id=upstream_id)
+        if not isinstance(details,dict):return base
+        info=details.get('info') if isinstance(details.get('info'),dict) else {}
+        movie_data=details.get('movie_data') if isinstance(details.get('movie_data'),dict) else {}
+        original=base['info']
+        result_info={**original}
+        for key,alternatives in {
+            'name':['name'],'movie_image':['movie_image','cover_big','cover'],
+            'plot':['plot','description'],'genre':['genre'],
+            'releasedate':['releasedate','releaseDate','date'],'rating':['rating'],
+            'duration':['duration'],'director':['director'],'cast':['cast','actors'],
+            'youtube_trailer':['youtube_trailer']}.items():
+            for alias in alternatives:
+                value=info.get(alias)
+                if value is not None and not isinstance(value,(list,dict)) and str(value).strip():
+                    result_info[key]=str(value);break
+        result={'info':result_info,'movie_data':{**base['movie_data'],**{k:v for k,v in movie_data.items() if k not in ('stream_id','name','container_extension')}}}
+        with LOCK:UPSTREAM_ROWS['movie_info'][sid]={**result,'_loaded':True}
+        return result
+    except Exception as e:
+        print('Movie info error',type(e).__name__,flush=True)
+        return base
+
+def series_details(sid):
+    with LOCK:
+        cached=UPSTREAM_ROWS['series_info'].get(sid)
+        if isinstance(cached,dict):return cached
         upstream_id=UPSTREAM_SERIES_IDS.get(sid)
+        row=next((r for r in UPSTREAM_ROWS['series'] if r['series_id']==sid),{})
     if upstream_id is None:return {}
     try:
-        details=xtream_api('get_series_info',series_id=upstream_id)
+        with DETAIL_SEMAPHORE:details=xtream_api('get_series_info',series_id=upstream_id)
+        if not isinstance(details,dict):return {}
+        info=details.get('info') if isinstance(details.get('info'),dict) else {}
+        seasons_raw=details.get('seasons') if isinstance(details.get('seasons'),list) else []
+        season_map={}
+        for item in seasons_raw:
+            if isinstance(item,dict):
+                try:season_map[int(item.get('season_number'))]=item
+                except (ValueError,TypeError):pass
         episodes={};seasons=[];new_urls={}
         for season,eps in (details.get('episodes') or {}).items():
             if not isinstance(eps,list):continue
+            try:n=int(season)
+            except (ValueError,TypeError):continue
             rows=[]
             for ep in eps:
+                if not isinstance(ep,dict):continue
                 try:
                     original=int(ep['id']);ext=str(ep.get('container_extension') or 'mp4').lower()
                     if ext not in ('mp4','mkv','avi','ts'):continue
                     eid=stable_id('xtream-episode|'+str(original))
+                    meta=ep.get('info') if isinstance(ep.get('info'),dict) else {}
                     new_urls[eid]=('series',original,ext)
                     rows.append({'id':str(eid),'episode_num':int(ep.get('episode_num') or len(rows)+1),
-                                 'title':str(ep.get('title') or 'Episode'), 'container_extension':ext,
-                                 'info':{'movie_image':str(ep.get('info',{}).get('movie_image','') if isinstance(ep.get('info'),dict) else ''),
-                                         'plot':''}})
+                        'title':safe_text(ep.get('title') or 'Episode'), 'container_extension':ext,
+                        'added':safe_text(ep.get('added')),'season':n,
+                        'info':{'movie_image':safe_text(meta.get('movie_image') or meta.get('cover') or row.get('cover')),
+                                'plot':safe_text(meta.get('plot') or meta.get('description')),
+                                'duration':safe_text(meta.get('duration'))}})
                 except (ValueError,KeyError,TypeError):continue
             if rows:
-                episodes[str(season)]=rows
-                try:n=int(season)
-                except (ValueError,TypeError):n=1
-                seasons.append({'season_number':n,'name':'Season '+str(season),'episode_count':len(rows),'cover':''})
-        result={'info':details.get('info') or {},'seasons':seasons,'episodes':episodes}
+                rows.sort(key=lambda x:x['episode_num'])
+                episodes[str(n)]=rows
+                existing=season_map.get(n,{})
+                seasons.append({'season_number':n,'name':safe_text(existing.get('name') or 'Season '+str(n)),
+                    'episode_count':len(rows),'cover':safe_text(existing.get('cover') or row.get('cover'))})
+        seasons.sort(key=lambda x:x['season_number'])
+        result={'info':{'name':safe_text(info.get('name') or row.get('name')),
+                        'cover':safe_text(info.get('cover') or row.get('cover')),
+                        'plot':safe_text(info.get('plot') or row.get('plot')),
+                        'genre':safe_text(info.get('genre') or row.get('genre')),
+                        'releaseDate':safe_text(info.get('releaseDate') or row.get('releaseDate')),
+                        'rating':safe_text(info.get('rating') or row.get('rating'))},
+                'seasons':seasons,'episodes':episodes}
         with LOCK:
             UPSTREAM['series'].update(new_urls)
             UPSTREAM_ROWS['series_info'][sid]=result
@@ -538,7 +616,7 @@ class Handler(BaseHTTPRequestHandler):
         # Upstream is configured by the server operator, not by the requester.
         url=(XTREAM_URL+'/'+kind+'/'+urllib.parse.quote(XTREAM_USER,safe='')+'/'+
              urllib.parse.quote(XTREAM_PASSWORD,safe='')+'/'+str(upstream_id)+'.'+ext)
-        headers={'User-Agent':'OG-IPTV/3.8'}
+        headers={'User-Agent':'OG-IPTV/3.9'}
         if self.headers.get('Range'):headers['Range']=self.headers['Range']
         try:
             req=urllib.request.Request(url,headers=headers)
@@ -576,7 +654,7 @@ class Handler(BaseHTTPRequestHandler):
         vod['series_info']={**vod['series_info'],**extra['series_info']}
         vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.8',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.9',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -600,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
                 'xtream':upstream_meta})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'3.8','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'3.9','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -640,7 +718,7 @@ class Handler(BaseHTTPRequestHandler):
         if action=='get_vod_info':
             try:sid=int(get('vod_id'))
             except ValueError:return self.reply({})
-            return self.reply(vod['movie_info'].get(sid,{}))
+            return self.reply(movie_details(sid) if sid in UPSTREAM_MOVIE_IDS else (vod['movie_info'].get(sid) or {}))
         if action=='get_series_categories':return self.reply(vod['series_categories'])
         if action=='get_series':return self.reply([s for s in vod['series'] if not cid or s['category_id']==cid])
         if action=='get_series_info':
