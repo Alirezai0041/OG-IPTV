@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.0 - public playlist validation and Xtream-compatible API."""
-import os, re, json, time, hashlib, urllib.request, urllib.parse, urllib.error
+"""OG IPTV 3.1 - public playlist validation and Xtream-compatible API."""
+import os, re, json, time, hashlib, urllib.request, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -11,7 +11,7 @@ USER=os.getenv('IPTV_USER','ogdemo')
 PASSWORD=os.getenv('IPTV_PASSWORD','change-me-now')
 PUBLIC_URL=os.getenv('PUBLIC_URL','https://og-iptv.onrender.com').rstrip('/')
 CACHE_SECONDS=int(os.getenv('CACHE_SECONDS','3600'))
-MAX_CHECKS=int(os.getenv('MAX_CHECKS','80'))
+MAX_CHECKS=max(1,int(os.getenv('MAX_CHECKS','80')))
 WORKERS=max(1,min(int(os.getenv('CHECK_WORKERS','16')),20))
 SOURCES={
  'IR':'https://iptv-org.github.io/iptv/countries/ir.m3u',
@@ -34,7 +34,7 @@ CACHE={'at':0,'streams':[],'urls':{},'stats':{},'checking':False}
 LOCK=Lock()
 
 def fetch_text(url,limit=8000000):
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.0','Accept':'*/*'})
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.1','Accept':'*/*'})
     with urllib.request.urlopen(req,timeout=15) as r:
         return r.read(limit).decode('utf-8','replace')
 
@@ -54,7 +54,7 @@ def parse_m3u(key,raw):
 
 def check(item):
     key,name,logo,url=item
-    # Lightweight response check; not a guarantee of actual playback.
+    # HTTP validation is only a preliminary check, not a playback guarantee.
     try:
         req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Range':'bytes=0-4095','Accept':'*/*'})
         with urllib.request.urlopen(req,timeout=4) as r:
@@ -88,7 +88,6 @@ def load():
                     candidates.extend(entries)
                 except Exception as exc:
                     stats[key]={'found':0,'checked':0,'accepted':0,'error':str(exc)[:120]}
-            # Check a bounded sample per category, instead of only the first country.
             groups={k:[] for k in KEYS}
             for item in candidates:groups[item[0]].append(item)
             selected=[]
@@ -109,7 +108,7 @@ def load():
                 streams.append({'num':len(streams)+1,'name':name,'stream_type':'live','stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0','category_id':str(KEYS.index(key)+1),'custom_sid':'','tv_archive':0,'direct_source':url,'tv_archive_duration':0,'container_extension':'m3u8'})
                 urls[sid]=url
             CACHE.update(at=time.time(),streams=streams,urls=urls,stats=stats)
-            print('OG IPTV 3.0 checked',len(selected),'accepted',len(streams),flush=True)
+            print('OG IPTV 3.1 checked',len(selected),'accepted',len(streams),flush=True)
         finally:
             CACHE['checking']=False
 
@@ -123,28 +122,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command!='HEAD':self.wfile.write(body)
     def do_HEAD(self):
-        self.reply({'ok':True} if self.path.split('?')[0] in ('/','/health') else {'error':'Not found'},200 if self.path.split('?')[0] in ('/','/health') else 404)
+        path=urllib.parse.urlsplit(self.path).path
+        self.reply({'ok':True} if path in ('/','/health') else {'error':'Not found'},200 if path in ('/','/health') else 404)
     def do_GET(self):
         parsed=urllib.parse.urlsplit(self.path);path=parsed.path
         p=urllib.parse.parse_qs(parsed.query)
         get=lambda key:p.get(key,[''])[0]
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.0','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.1','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
             load()
-            return self.reply({'version':'3.0','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
-        if path.startswith('/live/'):
+            return self.reply({'version':'3.1','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
+        # Smarters can request /USERNAME/PASSWORD/STREAM_ID (no /live prefix).
+        # Also preserve the /live/USERNAME/PASSWORD/STREAM_ID.m3u8 route.
+        parts=path.strip('/').split('/')
+        if (len(parts)==3 or (len(parts)==4 and parts[0]=='live')):
             try:
-                parts=path.strip('/').split('/')
-                if len(parts)!=4:raise ValueError()
-                _,u,pw,filename=parts
-                if urllib.parse.unquote(u)!=USER or urllib.parse.unquote(pw)!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
+                if len(parts)==3:
+                    u,pw,filename=parts
+                else:
+                    _,u,pw,filename=parts
+                if urllib.parse.unquote(u)!=USER or urllib.parse.unquote(pw)!=PASSWORD:
+                    return self.reply({'error':'Unauthorized'},401)
                 sid=int(filename.split('.')[0])
-            except ValueError:return self.reply({'error':'Invalid stream URL'},400)
+            except ValueError:
+                return self.reply({'error':'Invalid stream URL'},400)
             load();target=CACHE['urls'].get(sid)
             if not target:return self.reply({'error':'Unknown stream'},404)
-            self.send_response(302);self.send_header('Location',target);self.end_headers();return
+            self.send_response(302)
+            self.send_header('Location',target)
+            self.send_header('Cache-Control','no-store')
+            self.end_headers()
+            return
         if path not in ('/player_api.php','/get.php'):return self.reply({'error':'Not found'},404)
         if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'user_info':{'auth':0,'status':'Disabled'}},401)
         load()
@@ -165,5 +175,5 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,'status':'Active','exp_date':None,'is_trial':'0','active_cons':'0','max_connections':'1','allowed_output_formats':['m3u8']},'server_info':{'url':public.hostname,'port':str(public.port or (443 if secure else 80)),'https_port':'443' if secure else '', 'server_protocol':public.scheme,'timezone':'Europe/Zurich','timestamp_now':int(time.time())}})
 
 if __name__=='__main__':
-    print('OG IPTV v3.0 running on',HOST,PORT,flush=True)
+    print('OG IPTV v3.1 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
