@@ -152,7 +152,7 @@ def publish_live(records,stats,checked,total,done=False,error=None):
         while sid in urls and urls[sid]!=url:sid=(sid%0x7fffffff)+1
         quality='4K' if h>=2160 else ('1440p' if h>=1440 else ('1080p' if h>=1080 else ('720p' if h>=720 else ''))) 
         streams.append({'num':len(streams)+1,'name':f'{name} [{quality}]' if quality else name,'stream_type':'live',
-                        'stream_id':sid,'stream_icon':logo,'epg_channel_id':str(item.get('epg_channel_id') or item.get('tvg_id') or ''),'added':'0',
+                        'stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0',
                         'category_id':ids[category],'custom_sid':'','tv_archive':0,
                         'direct_source':'','tv_archive_duration':0,'container_extension':'m3u8'})
         urls[sid]=url
