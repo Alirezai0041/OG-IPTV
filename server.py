@@ -527,7 +527,15 @@ class Handler(BaseHTTPRequestHandler):
                 'movies_loaded':len(vod['movie_info']),'series_loaded':len(vod['series_info']),
                 'movie_categories_loaded':len(vod['movie_categories']),
                 'series_categories_loaded':len(vod['series_categories']),
-                'vod_last_scan':int(vod['at']), 'xtream':dict(UPSTREAM_META)})
+                'vod_last_scan':int(vod['at']),
+                'xtream_config': {
+                    'enabled': XTREAM_ENABLED,
+                    'url_present': bool(XTREAM_URL),
+                    'user_present': bool(XTREAM_USER),
+                    'password_present': bool(XTREAM_PASSWORD),
+                    'ready': bool(XTREAM_READY)
+                },
+                'xtream':dict(UPSTREAM_META)})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
             return self.reply({'version':'3.7','stats':live['stats'],'checked':live['checked'],
