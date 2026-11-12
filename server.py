@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 4.6: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 4.6.1: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -48,8 +48,8 @@ ADULT_ENABLED=os.getenv('ADULT_ENABLED','1')=='1'
 PERSIAN_RESERVE_PERCENT=max(0,min(int(os.getenv('PERSIAN_RESERVE_PERCENT','55')),90))
 ADULT_MOVIE_NAME='🔞 فیلم‌های بزرگسالان 18+'
 ADULT_SERIES_NAME='🔞 سریال‌های بزرگسالان 18+'
-PERSIAN_DUB_TERMS=re.compile(r'(?i)(?:دوبله[‌\\s-]*فارسی|دوبله[‌\\s-]*پارسی|دوبله[‌\\s-]*ایرانی|دوبله[‌\\s-]*به[‌\\s-]*فارسی|دوبله[‌\\s-]*فارسي|مدبلج[‌\\s-]*فارسی|مدبلج[‌\\s-]*فارسي|persian[\\s_-]*dub(?:bed)?|farsi[\\s_-]*dub(?:bed)?|dub(?:bed)?[\\s_-]*(?:in[\\s_-]*)?(?:persian|farsi)|fa[\\s_-]*dub(?:bed)?)')
-PERSIAN_ORIGINAL_TERMS=re.compile(r'(?i)(?:ایران|ایرانی|فارسی|پارسی|iran(?:ian)?|farsi|persian|افلام[‌\\s]+ايراني|أفلام[‌\\s]+إيرانية)')
+PERSIAN_DUB_TERMS=re.compile(r'(?i)(?:دوبله[‌\s-]*فارسی|دوبله[‌\s-]*پارسی|دوبله[‌\s-]*ایرانی|دوبله[‌\s-]*به[‌\s-]*فارسی|دوبله[‌\s-]*فارسي|مدبلج[‌\s-]*فارسی|مدبلج[‌\s-]*فارسي|persian[\s_-]*dub(?:bed)?|farsi[\s_-]*dub(?:bed)?|dub(?:bed)?[\s_-]*(?:in[\s_-]*)?(?:persian|farsi)|fa[\s_-]*dub(?:bed)?)')
+PERSIAN_ORIGINAL_TERMS=re.compile(r'(?i)(?:ایران|ایرانی|فارسی|پارسی|iran(?:ian)?|farsi|persian|افلام[‌\s]+ايراني|أفلام[‌\s]+إيرانية)')
 PERSIAN_VOD_TERMS=re.compile(r'(?i)(?:ایران|ایرانی|فارسی|پارسی|دوبله\s*فارسی|زیرنویس\s*فارسی|iran(?:ian)?|farsi|persian|farsi\s*dubbed|persian\s*dubbed|dubbed\s*in\s*persian|افلام\s+ايراني|أفلام\s+إيرانية|مدبلج\s*فارسي)')
 ADULT_TERMS=re.compile(r'(?i)(?:\bxxx\b|\b18\s*\+\b|\badult\b|\bporn\b|\berotic\b|\bnsfw\b|\badulte\b|\bporno\b|\bsexy\b|بزرگسال|للكبار|للبالغين)')
 BEIN_TERMS=re.compile(r'(?i)(?:\bbe\s*in\s*(?:sports?|sport)?\b|\bbein\b|\bbein\s*max\b)')
@@ -840,7 +840,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Unique ids avoid double counting items assigned to multiple categories.
                 return len({str(row.get('stream_id',row.get('series_id',''))) for row in rows
                     if pattern.search(names.get(str(row.get('category_id')),''))})
-            return self.reply({'ok':True,'name':'OG IPTV','version':'4.6',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'4.6.1',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -857,6 +857,8 @@ class Handler(BaseHTTPRequestHandler):
                 'adult_movies_loaded':sum(1 for r in vod['movies'] if str(next((c.get('category_name','') for c in vod['movie_categories'] if str(c.get('category_id'))==str(r.get('category_id'))),''))==ADULT_MOVIE_NAME),
                 'persian_movie_categories':sum(1 for c in vod['movie_categories'] if PERSIAN_VOD_TERMS.search(str(c.get('category_name','')))),
                 'persian_series_categories':sum(1 for c in vod['series_categories'] if PERSIAN_VOD_TERMS.search(str(c.get('category_name','')))),
+                'persian_dubbed_movie_categories':sum(bool(PERSIAN_DUB_TERMS.search(name)) for name in movie_category_names.values()),
+                'persian_dubbed_series_categories':sum(bool(PERSIAN_DUB_TERMS.search(name)) for name in series_category_names.values()),
                 'persian_dubbed_movies_loaded':category_count(vod['movies'],movie_category_names,PERSIAN_DUB_TERMS),
                 'persian_dubbed_series_loaded':category_count(vod['series'],series_category_names,PERSIAN_DUB_TERMS),
                 'persian_original_movies_loaded':category_count(vod['movies'],movie_category_names,re.compile(r'فارسی و ایرانی')),
@@ -882,7 +884,7 @@ class Handler(BaseHTTPRequestHandler):
                 'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':bool(XMLTV_URL),'xmltv_channels':len(XMLTV_STATE['channels']),'xmltv_error':XMLTV_STATE['error'],'epg_channel_ids':sum(bool(s.get('epg_channel_id')) for s in live['streams'])}})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'4.6','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'4.6.1','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
