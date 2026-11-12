@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""OG IPTV 4.1: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 4.2: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
 No premium subscription circumvention or copyrighted catalog scraping.
 """
-import os, re, json, time, hashlib, urllib.request, urllib.parse, urllib.error
+import os, re, json, time, hashlib, urllib.request, urllib.parse, urllib.error, base64, gzip, datetime, xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, as_completed
 from threading import RLock, Thread, BoundedSemaphore
@@ -37,6 +37,9 @@ UPSTREAM_MOVIE_IDS={}
 UPSTREAM_LIVE_IDS={}
 EPG_CACHE={}
 EPG_CACHE_TTL=900
+XMLTV_URL=os.getenv('XMLTV_URL','').strip()  # Operator-provided authorized XMLTV feed
+XMLTV_STATE={'at':0,'channels':{},'error':None}
+XMLTV_LOCK=RLock()
 ADULT_ENABLED=os.getenv('ADULT_ENABLED','1')=='1'
 ADULT_TERMS=re.compile(r'(?i)(?:\bxxx\b|\b18\s*\+\b|\badult\b|\bporn\b|\berotic\b|\bnsfw\b|\badulte\b|\bporno\b|\bsexy\b|بزرگسال|للكبار|للبالغين)')
 BEIN_TERMS=re.compile(r'(?i)(?:\bbe\s*in\s*(?:sports?|sport)?\b|\bbein\b|\bbein\s*max\b)')
@@ -416,12 +419,24 @@ def balanced_selection(items, category_names, limit):
     # Languages with explicit source labels get early slots, but all categories participate.
     def priority(cid):
         name=str(category_names.get(cid,'')).casefold()
-        if re.search(r'persian|farsi|فارسی|ایرانی|ايراني|إيرانية|ایرانی|iran|\bfa\b|\bper\b',name):return 0
-        if re.search(r'english|anglais|\ben\b|\buk\b|\busa\b',name):return 1
+        if re.search(r'persian|farsi|فارسی|ایرانی|ايراني|إيرانية|ایرانی|iran|\bfa\b|\bper\b|دوبله فارسی|هندی.*فارسی|hindi.*farsi|hindi.*persian',name):return 0
+        if re.search(r'english|anglais|\ben\b|\buk\b|\busa\b|hindi|bollywood|indian',name):return 1
         if re.search(r'french|français|\bfr\b',name):return 2
         return 3
     order=sorted(buckets,key=lambda c:(priority(c),c))
     result=[]
+    # Reserve up to 18% of the cap for explicitly Persian/Iranian source categories.
+    # This is a *selection* preference; it cannot create titles absent from the provider.
+    persian=[cid for cid in order if priority(cid)==0]
+    reserve=min(limit*18//100, sum(len(buckets[cid]) for cid in persian))
+    while persian and len(result)<reserve:
+        more=[]
+        for cid in persian:
+            if len(result)>=reserve:break
+            if buckets[cid]:result.append(buckets[cid].popleft())
+            if buckets[cid]:more.append(cid)
+        persian=more
+    order=[cid for cid in order if buckets[cid]]
     while order and len(result)<limit:
         next_order=[]
         for cid in order:
@@ -433,23 +448,67 @@ def balanced_selection(items, category_names, limit):
     return result
 
 
+def xmltv_parse_date(value):
+    try:
+        return int(datetime.datetime.strptime(value[:14], '%Y%m%d%H%M%S').replace(
+            tzinfo=datetime.timezone.utc).timestamp()) - (int(value[15:18])*3600 + int(value[18:20])*60 if len(value)>19 and value[15] in '+-' else 0) * (-1 if len(value)>15 and value[15]=='-' else 1)
+    except (ValueError, TypeError, IndexError):return 0
+
+def xmltv_data():
+    if not XMLTV_URL or not XMLTV_URL.startswith(('https://','http://')):return {}
+    with XMLTV_LOCK:
+        if XMLTV_STATE['at'] and time.time()-XMLTV_STATE['at']<3600:return XMLTV_STATE['channels']
+        try:
+            req=urllib.request.Request(XMLTV_URL,headers={'User-Agent':'OG-IPTV/4.2','Accept-Encoding':'gzip'})
+            with urllib.request.urlopen(req,timeout=25) as resp:
+                raw=resp.read(30000001)
+                if len(raw)>30000000:raise ValueError('XMLTV feed too large')
+                if resp.headers.get('Content-Encoding')=='gzip' or XMLTV_URL.endswith('.gz'):
+                    raw=gzip.decompress(raw)
+                    if len(raw)>120000000:raise ValueError('XMLTV decompressed feed too large')
+            root=ET.fromstring(raw)
+            guide={};now=int(time.time())
+            for elem in root.iter('programme'):
+                start=xmltv_parse_date(elem.get('start',''));end=xmltv_parse_date(elem.get('stop',''))
+                if not start or end<now-3600 or start>now+86400:continue
+                cid=elem.get('channel','')
+                title=elem.findtext('title') or ''
+                description=elem.findtext('desc') or ''
+                guide.setdefault(cid,[]).append({'id':cid,'title':title,'description':description,
+                    'start':str(start),'end':str(end),'start_timestamp':start,'stop_timestamp':end,
+                    'now_playing':int(start<=now<end),'has_archive':0})
+            XMLTV_STATE.update(at=time.time(),channels=guide,error=None)
+        except Exception as exc:
+            XMLTV_STATE.update(at=time.time(),error=type(exc).__name__)
+        return XMLTV_STATE['channels']
+
+def epg_from_xmltv(sid):
+    with LOCK:
+        row=next((r for r in UPSTREAM_ROWS['live'] if r['stream_id']==sid),None)
+        if not row:row=next((r for r in STATE['streams'] if r['stream_id']==sid),None)
+    cid=(row or {}).get('epg_channel_id','')
+    entries=xmltv_data().get(cid,[]) if cid else []
+    return {'epg_listings':[dict(e,title=base64.b64encode(e['title'].encode()).decode(),
+        description=base64.b64encode(e['description'].encode()).decode()) for e in entries]}
+
 def epg_from_upstream(sid, action, limit='20'):
     """Forward authorized EPG metadata, without exposing upstream credentials."""
     with LOCK:
         upstream_id=UPSTREAM_LIVE_IDS.get(sid)
         cached=EPG_CACHE.get((sid,action))
-    if upstream_id is None:return {'epg_listings':[]}
+    if upstream_id is None:return epg_from_xmltv(sid)
     if cached and time.time()-cached[0]<EPG_CACHE_TTL:return cached[1]
     try:
         kwargs={'stream_id':upstream_id}
         if action=='get_short_epg':kwargs['limit']=str(max(1,min(int(limit),50)))
         result=xtream_api(action,**kwargs)
         if not isinstance(result,dict):result={'epg_listings':[]}
+        if not result.get('epg_listings') and XMLTV_URL:result=epg_from_xmltv(sid)
         with LOCK:EPG_CACHE[(sid,action)]=(time.time(),result)
         return result
     except Exception as exc:
         print('EPG lookup error',type(exc).__name__,flush=True)
-        return {'epg_listings':[]}
+        return epg_from_xmltv(sid)
 
 def xtream_catalog():
     """Build limited, read-only upstream catalog. Does not download media."""
@@ -551,7 +610,8 @@ def safe_text(value):
 def vod_group(source_name,title,kind):
     raw=str(source_name or '').strip()
     norm=raw.casefold()
-    iranian=bool(re.search(r'ایران|ایرانی|فارسی|\biran(?:ian)?\b|\bfarsi\b|\bpersian\b|افلام\s+ايراني|أفلام\s+إيرانية',norm,re.I))
+    iranian=bool(re.search(r'ایران|ایرانی|فارسی|دوبله\s*فارسی|\biran(?:ian)?\b|\bfarsi\b|\bpersian\b|افلام\s+ايراني|أفلام\s+إيرانية|مدبلج\s*فارسي',norm,re.I))
+    hindi_farsi=iranian and bool(re.search(r'هند|هندی|hindi|indian|bollywood|هندي',norm,re.I))
     lang='FA' if iranian else ''
     if not lang:
         m=re.search(r'\[([A-Za-z]{2,3})\]',raw,re.I)
@@ -560,8 +620,10 @@ def vod_group(source_name,title,kind):
         for word,code in [('french','FR'),('français','FR'),('english','EN'),('anglais','EN'),('german','DE'),('deutsch','DE'),('arabic','AR'),('spanish','ES'),('turkish','TR')]:
             if word in norm:lang=code;break
     genre=genre_name(raw)
+    if hindi_farsi:
+        return ('🎬 فیلم هندی دوبله فارسی' if kind=='MOVIES' else '📺 سریال هندی دوبله فارسی') + ((' | '+genre) if genre!='OTHER' else '')
     if iranian:
-        return ('🎬 فیلم‌های ایرانی' if kind=='MOVIES' else '📺 سریال‌های ایرانی') + ((' | '+genre) if genre!='OTHER' else '')
+        return ('🎬 فیلم‌های فارسی و ایرانی' if kind=='MOVIES' else '📺 سریال‌های فارسی و ایرانی') + ((' | '+genre) if genre!='OTHER' else '')
     if genre!='OTHER':return kind+' | '+genre+' ['+(lang or 'UND')+']'
     # Preserve original provider classification instead of merging unrelated categories.
     return kind+' | '+(raw or 'Uncategorized')
@@ -674,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
         # Upstream is configured by the server operator, not by the requester.
         url=(XTREAM_URL+'/'+kind+'/'+urllib.parse.quote(XTREAM_USER,safe='')+'/'+
              urllib.parse.quote(XTREAM_PASSWORD,safe='')+'/'+str(upstream_id)+'.'+ext)
-        headers={'User-Agent':'OG-IPTV/4.1','Accept-Encoding':'identity'}
+        headers={'User-Agent':'OG-IPTV/4.2','Accept-Encoding':'identity'}
         if self.headers.get('Range'):headers['Range']=self.headers['Range']
         if self.headers.get('If-Range'):headers['If-Range']=self.headers['If-Range']
         try:
@@ -719,7 +781,7 @@ class Handler(BaseHTTPRequestHandler):
         vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
             category_lookup={str(c['category_id']):str(c['category_name']) for c in live['categories']}
-            return self.reply({'ok':True,'name':'OG IPTV','version':'4.1',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'4.2',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -742,11 +804,15 @@ class Handler(BaseHTTPRequestHandler):
                     'ready': bool(XTREAM_READY)
                 },
                 'xtream':upstream_meta,
+                'source_breakdown':{'live_public':len(STATE['streams']),'live_subscription':len(extra['live']),
+                    'movies_subscription':len(extra['movies']),'series_subscription':len(extra['series']),
+                    'bein_subscription':sum(bool(BEIN_TERMS.search(str(r.get('name','')))) for r in extra['live']),
+                    'adult_subscription':sum(bool(ADULT_TERMS.search(str(r.get('name','')))) for r in extra['live'])},
                 'catalog_limits':{'live':XTREAM_LIVE_LIMIT,'movies':XTREAM_MOVIE_LIMIT,'series':XTREAM_SERIES_LIMIT},
-                'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':False,'epg_channel_ids':sum(bool(s.get('epg_channel_id')) for s in live['streams'])}})
+                'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':bool(XMLTV_URL),'xmltv_channels':len(XMLTV_STATE['channels']),'xmltv_error':XMLTV_STATE['error'],'epg_channel_ids':sum(bool(s.get('epg_channel_id')) for s in live['streams'])}})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'4.1','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'4.2','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -765,6 +831,18 @@ class Handler(BaseHTTPRequestHandler):
             if not target:return self.reply({'error':'Unknown stream'},404)
             self.send_response(302);self.send_header('Location',target)
             self.send_header('Cache-Control','no-store');self.end_headers();return
+        if path=='/xmltv.php':
+            if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
+            if not XMLTV_URL:return self.reply({'error':'XMLTV_URL not configured'},404)
+            # The XMLTV document is operator-supplied; never expose its private URL.
+            try:
+                req=urllib.request.Request(XMLTV_URL,headers={'User-Agent':'OG-IPTV/4.2'})
+                with urllib.request.urlopen(req,timeout=30) as resp:raw=resp.read(30000001)
+                if len(raw)>30000000:return self.reply({'error':'Guide too large'},413)
+                self.send_response(200);self.send_header('Content-Type','application/xml')
+                self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+            except Exception:return self.reply({'error':'Guide unavailable'},502)
+            return
         if path not in ('/player_api.php','/get.php'):return self.reply({'error':'Not found'},404)
         if get('username')!=USER or get('password')!=PASSWORD:
             return self.reply({'user_info':{'auth':0,'status':'Disabled'}},401)
@@ -811,5 +889,5 @@ if __name__=='__main__':
     if XTREAM_READY:
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v4.0 running on',HOST,PORT,flush=True)
+    print('OG IPTV v4.2 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
