@@ -776,8 +776,13 @@ def background_xtream():
     xtream_catalog()
 
 class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        # Avoid leaking Xtream/player credentials embedded in request URLs.
+        safe_path=urllib.parse.urlsplit(self.path).path
+        print('OG IPTV HTTP',self.command,safe_path,'status/log:',
+              str(args[1]) if len(args)>1 else '-',flush=True)
     def reply(self,obj,status=200):
-        body=json.dumps(obj,ensure_ascii=False).encode('utf-8')
+        body=json.dumps(obj,ensure_ascii=False,separators=(',',':')).encode('utf-8')
         self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8')
         self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(body)))
         self.end_headers()
@@ -819,19 +824,47 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed=urllib.parse.urlsplit(self.path);path=parsed.path
         params=urllib.parse.parse_qs(parsed.query);get=lambda k:params.get(k,[''])[0]
+        # Handle the Xtream login handshake BEFORE assembling large VOD lists.
+        # Smarters can call this repeatedly during a playlist refresh.
+        api_path=path in ('/player_api.php','/get.php')
+        if api_path and (get('username')!=USER or get('password')!=PASSWORD):
+            print('OG IPTV API authentication rejected (credentials omitted)',flush=True)
+            return self.reply({'user_info':{'auth':0,'status':'Disabled'}},401)
+        if api_path and path=='/player_api.php' and not get('action'):
+            public=urllib.parse.urlsplit(PUBLIC_URL);secure=public.scheme=='https'
+            return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,
+                'status':'Active','exp_date':None,'is_trial':'0','active_cons':'0','max_connections':'1',
+                'allowed_output_formats':['m3u8','mp4','mkv']},
+                'server_info':{'url':public.hostname,'port':str(public.port or (443 if secure else 80)),
+                'https_port':'443' if secure else '', 'server_protocol':public.scheme,
+                'timezone':'Europe/Zurich','timestamp_now':int(time.time())}})
+        # Read immutable published catalog references. Do not copy tens of thousands
+        # of movie/series metadata records on every HTTP request.
         with LOCK:
             live=dict(STATE);vod=dict(VOD)
             extra=dict(UPSTREAM_ROWS)
             upstream_meta=dict(UPSTREAM_META)
-        # Merge at request time, never mutate either scan's published snapshot.
-        live['streams']=live['streams']+extra['live']
-        live['categories']=live['categories']+extra['live_categories']
-        vod['movies']=vod['movies']+extra['movies']
-        vod['movie_info']={**vod['movie_info'],**extra['movie_info']}
-        vod['movie_categories']=vod['movie_categories']+extra['movie_categories']
-        vod['series']=vod['series']+extra['series']
-        vod['series_info']={**vod['series_info'],**extra['series_info']}
-        vod['series_categories']=vod['series_categories']+extra['series_categories']
+        action=get('action') if api_path else ''
+        need_live=(path in ('/','/health','/get.php','/diagnostics') or
+                   path.startswith(('/live/','/movie/','/series/')) or
+                   action in ('get_live_categories','get_live_streams'))
+        need_vod=(path in ('/','/health','/diagnostics') or
+                  path.startswith(('/live/','/movie/','/series/')) or
+                  action in ('get_vod_categories','get_vod_streams','get_vod_info',
+                             'get_series_categories','get_series','get_series_info'))
+        if need_live:
+            live['streams']=live['streams']+extra['live']
+            live['categories']=live['categories']+extra['live_categories']
+        if need_vod:
+            vod['movies']=vod['movies']+extra['movies']
+            vod['movie_categories']=vod['movie_categories']+extra['movie_categories']
+            vod['series']=vod['series']+extra['series']
+            vod['series_categories']=vod['series_categories']+extra['series_categories']
+            # Only detail requests need merged lookup dictionaries.
+            if action=='get_vod_info':
+                vod['movie_info']={**vod['movie_info'],**extra['movie_info']}
+            if action=='get_series_info':
+                vod['series_info']={**vod['series_info'],**extra['series_info']}
         if path in ('/','/health'):
             category_lookup={str(c['category_id']):str(c['category_name']) for c in live['categories']}
             movie_category_names={str(c.get('category_id')):str(c.get('category_name','')) for c in vod['movie_categories']}
@@ -840,7 +873,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Unique ids avoid double counting items assigned to multiple categories.
                 return len({str(row.get('stream_id',row.get('series_id',''))) for row in rows
                     if pattern.search(names.get(str(row.get('category_id')),''))})
-            return self.reply({'ok':True,'name':'OG IPTV','version':'4.6.1',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'4.6.2',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -852,7 +885,7 @@ class Handler(BaseHTTPRequestHandler):
                 'adult_live_discovery_note':'Existing public/authorized playlists only; no unverified streams generated',
                 'minimum_verified_height':MIN_HEIGHT,
                 'vod_scanning':vod['checking'],'vod_error':vod['error'],
-                'movies_loaded':len(vod['movie_info']),'series_loaded':len(vod['series_info']),
+                'movies_loaded':len(vod['movie_info'])+len(extra['movie_info']),'series_loaded':len(vod['series_info'])+len(extra['series_info']),
                 'movie_categories_loaded':len(vod['movie_categories']),
                 'adult_movies_loaded':sum(1 for r in vod['movies'] if str(next((c.get('category_name','') for c in vod['movie_categories'] if str(c.get('category_id'))==str(r.get('category_id'))),''))==ADULT_MOVIE_NAME),
                 'persian_movie_categories':sum(1 for c in vod['movie_categories'] if PERSIAN_VOD_TERMS.search(str(c.get('category_name','')))),
@@ -884,7 +917,7 @@ class Handler(BaseHTTPRequestHandler):
                 'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':bool(XMLTV_URL),'xmltv_channels':len(XMLTV_STATE['channels']),'xmltv_error':XMLTV_STATE['error'],'epg_channel_ids':sum(bool(s.get('epg_channel_id')) for s in live['streams'])}})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'4.6.1','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'4.6.2','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -916,8 +949,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:return self.reply({'error':'Guide unavailable'},502)
             return
         if path not in ('/player_api.php','/get.php'):return self.reply({'error':'Not found'},404)
-        if get('username')!=USER or get('password')!=PASSWORD:
-            return self.reply({'user_info':{'auth':0,'status':'Disabled'}},401)
         if path=='/get.php':
             lines=['#EXTM3U'];cats={c['category_id']:c['category_name'] for c in live['categories']}
             for s in live['streams']:
@@ -930,15 +961,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
         action=get('action');cid=get('category_id')
         if action=='get_live_categories':return self.reply(live['categories'])
-        if action=='get_live_streams':return self.reply([s for s in live['streams'] if not cid or s['category_id']==cid])
+        if action=='get_live_streams':return self.reply([s for s in live['streams'] if str(s['category_id'])==cid] if cid else live['streams'])
         if action=='get_vod_categories':return self.reply(vod['movie_categories'])
-        if action=='get_vod_streams':return self.reply([s for s in vod['movies'] if not cid or s['category_id']==cid])
+        if action=='get_vod_streams':return self.reply([s for s in vod['movies'] if str(s['category_id'])==cid] if cid else vod['movies'])
         if action=='get_vod_info':
             try:sid=int(get('vod_id'))
             except ValueError:return self.reply({})
             return self.reply(movie_details(sid) if sid in UPSTREAM_MOVIE_IDS else (vod['movie_info'].get(sid) or {}))
         if action=='get_series_categories':return self.reply(vod['series_categories'])
-        if action=='get_series':return self.reply([s for s in vod['series'] if not cid or s['category_id']==cid])
+        if action=='get_series':return self.reply([s for s in vod['series'] if str(s['category_id'])==cid] if cid else vod['series'])
         if action=='get_series_info':
             try:sid=int(get('series_id'))
             except ValueError:return self.reply({})
@@ -968,5 +999,5 @@ if __name__=='__main__':
     if XTREAM_READY:
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v4.4 running on',HOST,PORT,flush=True)
+    print('OG IPTV v4.6.2 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
