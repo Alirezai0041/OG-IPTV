@@ -1,92 +1,140 @@
 #!/usr/bin/env python3
-"""Build a bounded, licensed Internet Archive VOD feed outside Render.
-Only metadata explicitly marked CC0/Public Domain Mark is eligible.
-No downloads of video, no scraping of commercial streaming services.
+"""Discover Internet Archive videos with permissive *declared* reuse licenses.
+This is metadata screening, not proof of rights or successful playback.
+Runs on GitHub Actions, not the memory-constrained IPTV server.
 """
-import json, re, time, urllib.parse, urllib.request, pathlib, concurrent.futures
+import concurrent.futures
+import collections
+import json
+import os
+from pathlib import Path
+import re
+import urllib.parse
+import urllib.request
 
-OUT = pathlib.Path('external_movies.json')
-MAX_ITEMS = 100
-SEARCH_PER_QUERY = 90
-UA = 'OG-IPTV-catalog/1.0 (metadata discovery; contact via repository)'
-QUERIES = [
-    'mediatype:movies AND language:(per OR fas OR fa OR persian OR farsi) AND (licenseurl:creativecommons.org/publicdomain/zero/* OR licenseurl:creativecommons.org/publicdomain/mark/*)',
-    'mediatype:movies AND (title:iranian OR title:persian OR subject:iran OR subject:persian) AND (licenseurl:creativecommons.org/publicdomain/zero/* OR licenseurl:creativecommons.org/publicdomain/mark/*)',
-    'mediatype:movies AND (licenseurl:creativecommons.org/publicdomain/zero/* OR licenseurl:creativecommons.org/publicdomain/mark/*)',
+OUT = Path('external_movies.json')
+REPORT = Path('external_catalog_report.json')
+MAX_ITEMS = 150
+PER_QUERY = 100
+UA = 'OG-IPTV-metadata-discovery/2.0'
+SEARCHES = [
+    'mediatype:movies AND (language:persian OR language:farsi OR language:fas OR language:per OR language:dari)',
+    'mediatype:movies AND (title:persian OR title:iran OR title:afghan OR subject:persian OR subject:iran)',
+    'mediatype:movies AND licenseurl:creativecommons.org/licenses/*',
+    'mediatype:movies AND licenseurl:creativecommons.org/publicdomain/*',
 ]
+# BY and BY-SA allow redistribution under conditions. ND/NC excluded: service use and
+# adaptations are context-dependent; no assumption that commercial redistribution is permitted.
+LICENSE = re.compile(r'^https?://creativecommons\.org/(?:publicdomain/(?:zero|mark)/1\.0|licenses/(?:by|by-sa)/(?:2\.0|2\.5|3\.0|4\.0))(?:/|$)', re.I)
+VIDEO_EXT = ('.mp4', '.webm', '.ogv', '.m4v')
 
-def fetch(url, limit=3_000_000):
-    req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'application/json'})
-    with urllib.request.urlopen(req,timeout=24) as response:
-        raw=response.read(limit+1)
-    if len(raw)>limit:raise ValueError('metadata response too large')
+def get(url, limit=6_000_000):
+    req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/json'})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        raw = r.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('response too large')
     return json.loads(raw)
 
-def search(query):
-    args=urllib.parse.urlencode({'q':query,'fl[]':['identifier','title','language','subject'],'rows':SEARCH_PER_QUERY,'page':1,'output':'json'},doseq=True)
-    return fetch('https://archive.org/advancedsearch.php?'+args).get('response',{}).get('docs',[])
+def scalar(v):
+    if isinstance(v, list):
+        return ' '.join(str(x) for x in v[:5])
+    return str(v or '')
 
-def scalar(value):
-    if isinstance(value,list):return str(value[0]) if value else ''
-    return str(value or '')
+def search(q):
+    params = urllib.parse.urlencode({'q': q, 'fl[]': ['identifier', 'title', 'language', 'subject'], 'rows': PER_QUERY, 'page': 1, 'output': 'json'}, doseq=True)
+    return get('https://archive.org/advancedsearch.php?' + params)['response']['docs']
 
-def eligible(doc):
-    ident=scalar(doc.get('identifier'))
-    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,150}',ident):return None
-    data=fetch('https://archive.org/metadata/'+urllib.parse.quote(ident),limit=5_000_000)
-    md=data.get('metadata') or {}
-    license_url=scalar(md.get('licenseurl')).lower().rstrip('/')
-    if not (license_url.startswith('https://creativecommons.org/publicdomain/zero/1.0') or
-            license_url.startswith('http://creativecommons.org/publicdomain/zero/1.0') or
-            license_url.startswith('https://creativecommons.org/publicdomain/mark/1.0') or
-            license_url.startswith('http://creativecommons.org/publicdomain/mark/1.0')):return None
-    if scalar(md.get('mediatype')).lower()!='movies':return None
-    files=[]
-    for f in data.get('files',[]):
-        name=scalar(f.get('name'))
-        if f.get('private') or f.get('is_dark'):continue
-        if name.lower().endswith(('.mp4','.webm','.mkv')) and '/' not in name.lstrip('/'):
-            try:size=int(f.get('size') or 0)
-            except (TypeError,ValueError):size=0
-            if size>=2_000_000:files.append((f.get('source')=='original',size,name))
-    if not files:return None
+def inspect(doc):
+    ident = scalar(doc.get('identifier')).strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,150}', ident):
+        return 'bad_identifier', None
+    data = get('https://archive.org/metadata/' + urllib.parse.quote(ident))
+    md = data.get('metadata') or {}
+    if scalar(md.get('mediatype')).lower() != 'movies':
+        return 'not_movie', None
+    lic = scalar(md.get('licenseurl')).strip().split(' ')[0].rstrip('/')
+    if not LICENSE.match(lic):
+        return 'license_not_eligible', None
+    files = []
+    for f in data.get('files') or []:
+        name = scalar(f.get('name'))
+        if f.get('private') or f.get('is_dark') or '/' in name.lstrip('/') or not name.lower().endswith(VIDEO_EXT):
+            continue
+        try:
+            size = int(f.get('size') or 0)
+        except (ValueError, TypeError):
+            size = 0
+        if size >= 2_000_000:
+            files.append((f.get('source') == 'original', size, name))
+    if not files:
+        return 'no_video_file', None
     files.sort(reverse=True)
-    filename=files[0][2]
-    title=scalar(md.get('title') or doc.get('title') or ident).strip()
-    if not title:return None
-    lang=scalar(md.get('language') or doc.get('language'))
-    subject=scalar(md.get('subject') or doc.get('subject'))
-    persian=bool(re.search(r'(?i)(persian|farsi|iran|فارسی|ایران|دری|dari|\bfas\b|\bper\b)',title+' '+lang+' '+subject))
-    return {'title':title[:200], 'url':'https://archive.org/download/'+urllib.parse.quote(ident,safe='')+'/'+urllib.parse.quote(filename,safe='/'),
-        'language':'fa' if persian else lang[:60], 'genre':'Persian / Iranian' if persian else 'Archive',
-        'poster':'https://archive.org/services/img/'+urllib.parse.quote(ident,safe=''),
-        'description':('Public-domain/CC0 metadata: '+license_url)[:300],
-        'source':'Internet Archive (license metadata checked)', 'license_url':license_url,
-        'license_page':'https://archive.org/details/'+urllib.parse.quote(ident,safe='')}
+    title = scalar(md.get('title') or doc.get('title') or ident).strip()
+    if not title:
+        return 'no_title', None
+    lang = scalar(md.get('language') or doc.get('language'))
+    subjects = scalar(md.get('subject') or doc.get('subject'))
+    persian = bool(re.search(r'(persian|farsi|iran|afghan|dari|فارسی|ایران|افغان|دری|\bfas\b|\bper\b)', title + ' ' + lang + ' ' + subjects, re.I))
+    url = 'https://archive.org/download/' + urllib.parse.quote(ident, safe='') + '/' + urllib.parse.quote(files[0][2], safe='')
+    item = {
+        'title': title[:200], 'url': url,
+        'language': 'fa' if persian else lang[:60],
+        'genre': 'Persian / Iranian' if persian else 'Archive',
+        'poster': 'https://archive.org/services/img/' + urllib.parse.quote(ident, safe=''),
+        'description': ('Declared reuse license: ' + lic)[:300],
+        'source': 'Internet Archive (declared license; rights/playback unverified)',
+        'license_url': lic,
+        'license_page': 'https://archive.org/details/' + urllib.parse.quote(ident, safe='')
+    }
+    return 'accepted', item
 
 def main():
-    docs=[];seen=set()
-    for q in QUERIES:
+    counters = collections.Counter()
+    docs, seen = [], set()
+    for i, query in enumerate(SEARCHES, 1):
         try:
-            for d in search(q):
-                ident=scalar(d.get('identifier'))
-                if ident not in seen:docs.append(d);seen.add(ident)
-        except Exception as e:print('Search failed:',type(e).__name__,str(e)[:100])
-    results=[]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-        futures=[pool.submit(eligible,d) for d in docs[:240]]
-        for f in concurrent.futures.as_completed(futures):
+            found = search(query)
+            print(f'Search {i}: {len(found)} results', flush=True)
+            counters['search_results'] += len(found)
+            for d in found:
+                ident = scalar(d.get('identifier'))
+                if ident not in seen:
+                    seen.add(ident)
+                    docs.append(d)
+        except Exception as e:
+            counters['search_errors'] += 1
+            print(f'Search {i} FAILED: {type(e).__name__}: {str(e)[:220]}', flush=True)
+    print(f'Unique candidates: {len(docs)}', flush=True)
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(inspect, d) for d in docs[:350]]
+        for future in concurrent.futures.as_completed(futures):
             try:
-                item=f.result()
-                if item:results.append(item)
-            except Exception:pass
-    results.sort(key=lambda x:(not bool(re.search(r'(?i)(persian|farsi|iran|فارسی|ایران|دری)',x['title']+' '+x['genre'])),x['title'].casefold()))
-    results=results[:MAX_ITEMS]
-    # Preserve last good catalog when discovery is temporarily unavailable.
-    if not results and OUT.exists():
-        print('No verified results; preserving previous catalog');return
-    OUT.write_text(json.dumps(results,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
-    print('Wrote',len(results),'license-filtered films; Persian metadata',sum(x['language']=='fa' for x in results))
-    print('NOTE: metadata licensing does not independently prove uploader ownership or playback availability.')
+                reason, item = future.result()
+                counters[reason] += 1
+                if item:
+                    results.append(item)
+            except Exception as e:
+                counters['metadata_errors'] += 1
+                if counters['metadata_errors'] <= 5:
+                    print(f'Metadata error: {type(e).__name__}: {str(e)[:160]}', flush=True)
+    results.sort(key=lambda x: (x['language'] != 'fa', x['title'].casefold()))
+    results = results[:MAX_ITEMS]
+    report = {'candidates': len(docs), 'accepted': len(results), 'persian_metadata': sum(x['language'] == 'fa' for x in results), 'counts': dict(counters), 'note': 'Archive license metadata is not independent proof of rights or playback. Verify before distribution.'}
+    REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print('DISCOVERY REPORT:', json.dumps(report, ensure_ascii=False), flush=True)
+    if not results:
+        print('NO NEW FILMS: preserving previous nonempty catalog if present.', flush=True)
+        if not OUT.exists():
+            OUT.write_text('[]\n', encoding='utf-8')
+        elif OUT.read_text(encoding='utf-8').strip() in ('', '[]'):
+            OUT.write_text('[]\n', encoding='utf-8')
+        if counters['search_errors'] == len(SEARCHES):
+            raise SystemExit('All archive searches failed; see report.')
+        return
+    OUT.write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print(f'Wrote {len(results)} candidates, Persian-tagged {report["persian_metadata"]}. Playback not verified.', flush=True)
 
-if __name__=='__main__':main()
+if __name__ == '__main__':
+    main()
