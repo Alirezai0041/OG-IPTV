@@ -1,0 +1,29 @@
+name: Refresh licensed external movie catalog
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 2'
+permissions:
+  contents: write
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Discover license-marked archive movies
+        run: python build_external_catalog.py
+      - name: Validate generated JSON
+        run: python -m json.tool external_movies.json > /dev/null
+      - name: Commit feed when changed
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add external_movies.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Refresh licensed external movie catalog'
+            git push
+          fi
