@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.7: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 3.7.1: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -32,6 +32,8 @@ XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','30')),1000))
 XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','0')),1000))
 XTREAM_READY=XTREAM_ENABLED and all((XTREAM_URL,XTREAM_USER,XTREAM_PASSWORD))
 UPSTREAM={'live':{},'movie':{},'series':{}}
+UPSTREAM_ROWS={'live':[],'live_categories':[],'movies':[],'movie_info':{},'movie_categories':[],
+               'series':[],'series_info':{},'series_categories':[]}
 UPSTREAM_META={'status':'disabled','movies':0,'series':0,'live':0,'error':None}
 
 BASE='https://iptv-org.github.io/iptv/'
@@ -446,20 +448,17 @@ def xtream_catalog():
                     'tv_archive_duration':0,'container_extension':'ts'})
                 lurls[sid]=('live',upstream_id,'ts')
             except (KeyError,ValueError,TypeError):continue
+        # Keep upstream catalog separate from public scans. Public scan snapshots
+        # can update at any time without erasing upstream entries.
         with LOCK:
             UPSTREAM['movie']=murls;UPSTREAM['series']=surls;UPSTREAM['live']=lurls
-            UPSTREAM_META.update(status='ready',movies=len(murls),series=len(sinfo),live=len(lurls))
-            VOD['movies']=VOD['movies']+mrows
-            VOD['movie_info']={**VOD['movie_info'],**minfo}
-            VOD['movie_categories']=VOD['movie_categories']+[
-                {'category_id':v,'category_name':k,'parent_id':0} for k,v in mcats.items()]
-            VOD['series']=VOD['series']+srows
-            VOD['series_info']={**VOD['series_info'],**sinfo}
-            VOD['series_categories']=VOD['series_categories']+[
-                {'category_id':v,'category_name':k,'parent_id':0} for k,v in scats.items()]
-            STATE['streams']=STATE['streams']+lrows
-            STATE['categories']=STATE['categories']+[
-                {'category_id':v,'category_name':k,'parent_id':0} for k,v in lcats.items()]
+            UPSTREAM_ROWS.update(live=lrows,
+                live_categories=[{'category_id':v,'category_name':k,'parent_id':0} for k,v in lcats.items()],
+                movies=mrows,movie_info=minfo,
+                movie_categories=[{'category_id':v,'category_name':k,'parent_id':0} for k,v in mcats.items()],
+                series=srows,series_info=sinfo,
+                series_categories=[{'category_id':v,'category_name':k,'parent_id':0} for k,v in scats.items()])
+            UPSTREAM_META.update(status='ready',movies=len(murls),series=len(sinfo),live=len(lurls),error=None)
         print('OG IPTV Xtream catalog ready',UPSTREAM_META['movies'],UPSTREAM_META['series'],flush=True)
     except Exception as exc:
         with LOCK:UPSTREAM_META.update(status='error',error=type(exc).__name__)
@@ -467,11 +466,7 @@ def xtream_catalog():
 
 
 def background_xtream():
-    # Wait for initial independent scans so their snapshots are not overwritten.
-    for _ in range(900):
-        with LOCK:done=(not VOD['checking'] and VOD['at'] and (not XTREAM_LIVE_LIMIT or (not STATE['checking'] and STATE['at'])))
-        if done:break
-        time.sleep(2)
+    # Catalog metadata loads independently; no waiting for public scan.
     xtream_catalog()
 
 class Handler(BaseHTTPRequestHandler):
@@ -512,9 +507,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed=urllib.parse.urlsplit(self.path);path=parsed.path
         params=urllib.parse.parse_qs(parsed.query);get=lambda k:params.get(k,[''])[0]
-        with LOCK:live=dict(STATE);vod=dict(VOD)
+        with LOCK:
+            live=dict(STATE);vod=dict(VOD)
+            extra=dict(UPSTREAM_ROWS)
+            upstream_meta=dict(UPSTREAM_META)
+        # Merge at request time, never mutate either scan's published snapshot.
+        live['streams']=live['streams']+extra['live']
+        live['categories']=live['categories']+extra['live_categories']
+        vod['movies']=vod['movies']+extra['movies']
+        vod['movie_info']={**vod['movie_info'],**extra['movie_info']}
+        vod['movie_categories']=vod['movie_categories']+extra['movie_categories']
+        vod['series']=vod['series']+extra['series']
+        vod['series_info']={**vod['series_info'],**extra['series_info']}
+        vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.7',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.7.1',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -535,10 +542,10 @@ class Handler(BaseHTTPRequestHandler):
                     'password_present': bool(XTREAM_PASSWORD),
                     'ready': bool(XTREAM_READY)
                 },
-                'xtream':dict(UPSTREAM_META)})
+                'xtream':upstream_meta})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'3.7','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'3.7.1','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -597,6 +604,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=='__main__':
     Thread(target=scan_live,daemon=True).start()
     Thread(target=scan_vod,daemon=True).start()
-    if XTREAM_READY:Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v3.7 running on',HOST,PORT,flush=True)
+    if XTREAM_READY:
+        with LOCK:UPSTREAM_META['status']='loading'
+        Thread(target=background_xtream,daemon=True).start()
+    print('OG IPTV v3.7.1 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
