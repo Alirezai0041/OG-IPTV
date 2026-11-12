@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.9: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 4.0: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -27,13 +27,16 @@ XTREAM_URL=os.getenv('XTREAM_URL','').rstrip('/')
 XTREAM_USER=os.getenv('XTREAM_USER','')
 XTREAM_PASSWORD=os.getenv('XTREAM_PASSWORD','')
 XTREAM_ENABLED=os.getenv('XTREAM_ENABLED','0')=='1'
-XTREAM_MOVIE_LIMIT=max(0,min(int(os.getenv('XTREAM_MOVIE_LIMIT','1000')),30000))
-XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','500')),10000))
-XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','1000')),25000))
+XTREAM_MOVIE_LIMIT=max(0,min(int(os.getenv('XTREAM_MOVIE_LIMIT','1000')),50000))
+XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','500')),20000))
+XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','1000')),30000))
 XTREAM_READY=XTREAM_ENABLED and all((XTREAM_URL,XTREAM_USER,XTREAM_PASSWORD))
 UPSTREAM={'live':{},'movie':{},'series':{}}
 UPSTREAM_SERIES_IDS={}
 UPSTREAM_MOVIE_IDS={}
+UPSTREAM_LIVE_IDS={}
+EPG_CACHE={}
+EPG_CACHE_TTL=900
 DETAIL_SEMAPHORE=BoundedSemaphore(5)
 UPSTREAM_ROWS={'live':[],'live_categories':[],'movies':[],'movie_info':{},'movie_categories':[],
                'series':[],'series_info':{},'series_categories':[]}
@@ -101,7 +104,7 @@ def check_live(url):
         return variants
     except Exception:return []
 
-COUNTRY_NAME_TO_CODE = {'aruba': 'AW', 'afghanistan': 'AF', 'angola': 'AO', 'anguilla': 'AI', 'åland islands': 'AX', 'albania': 'AL', 'andorra': 'AD', 'united arab emirates': 'AE', 'argentina': 'AR', 'armenia': 'AM', 'american samoa': 'AS', 'antarctica': 'AQ', 'french southern territories': 'TF', 'antigua and barbuda': 'AG', 'australia': 'AU', 'austria': 'AT', 'azerbaijan': 'AZ', 'burundi': 'BI', 'belgium': 'BE', 'benin': 'BJ', 'bonaire, sint eustatius and saba': 'BQ', 'burkina faso': 'BF', 'bangladesh': 'BD', 'bulgaria': 'BG', 'bahrain': 'BH', 'bahamas': 'BS', 'bosnia and herzegovina': 'BA', 'saint barthélemy': 'BL', 'belarus': 'BY', 'belize': 'BZ', 'bermuda': 'BM', 'bolivia, plurinational state of': 'BO', 'brazil': 'BR', 'barbados': 'BB', 'brunei darussalam': 'BN', 'bhutan': 'BT', 'bouvet island': 'BV', 'botswana': 'BW', 'central african republic': 'CF', 'canada': 'CA', 'cocos (keeling) islands': 'CC', 'switzerland': 'CH', 'chile': 'CL', 'china': 'CN', "côte d'ivoire": 'CI', 'cameroon': 'CM', 'congo, the democratic republic of the': 'CD', 'congo': 'CG', 'cook islands': 'CK', 'colombia': 'CO', 'comoros': 'KM', 'cabo verde': 'CV', 'costa rica': 'CR', 'cuba': 'CU', 'curaçao': 'CW', 'christmas island': 'CX', 'cayman islands': 'KY', 'cyprus': 'CY', 'czechia': 'CZ', 'germany': 'DE', 'djibouti': 'DJ', 'dominica': 'DM', 'denmark': 'DK', 'dominican republic': 'DO', 'algeria': 'DZ', 'ecuador': 'EC', 'egypt': 'EG', 'eritrea': 'ER', 'western sahara': 'EH', 'spain': 'ES', 'estonia': 'EE', 'ethiopia': 'ET', 'finland': 'FI', 'fiji': 'FJ', 'falkland islands (malvinas)': 'FK', 'france': 'FR', 'faroe islands': 'FO', 'micronesia, federated states of': 'FM', 'gabon': 'GA', 'united kingdom': 'GB', 'georgia': 'GE', 'guernsey': 'GG', 'ghana': 'GH', 'gibraltar': 'GI', 'guinea': 'GN', 'guadeloupe': 'GP', 'gambia': 'GM', 'guinea-bissau': 'GW', 'equatorial guinea': 'GQ', 'greece': 'GR', 'grenada': 'GD', 'greenland': 'GL', 'guatemala': 'GT', 'french guiana': 'GF', 'guam': 'GU', 'guyana': 'GY', 'hong kong': 'HK', 'heard island and mcdonald islands': 'HM', 'honduras': 'HN', 'croatia': 'HR', 'haiti': 'HT', 'hungary': 'HU', 'indonesia': 'ID', 'isle of man': 'IM', 'india': 'IN', 'british indian ocean territory': 'IO', 'ireland': 'IE', 'iran, islamic republic of': 'IR', 'iraq': 'IQ', 'iceland': 'IS', 'israel': 'IL', 'italy': 'IT', 'jamaica': 'JM', 'jersey': 'JE', 'jordan': 'JO', 'japan': 'JP', 'kazakhstan': 'KZ', 'kenya': 'KE', 'kyrgyzstan': 'KG', 'cambodia': 'KH', 'kiribati': 'KI', 'saint kitts and nevis': 'KN', 'korea, republic of': 'KR', 'kuwait': 'KW', "lao people's democratic republic": 'LA', 'lebanon': 'LB', 'liberia': 'LR', 'libya': 'LY', 'saint lucia': 'LC', 'liechtenstein': 'LI', 'sri lanka': 'LK', 'lesotho': 'LS', 'lithuania': 'LT', 'luxembourg': 'LU', 'latvia': 'LV', 'macao': 'MO', 'saint martin (french part)': 'MF', 'morocco': 'MA', 'monaco': 'MC', 'moldova, republic of': 'MD', 'madagascar': 'MG', 'maldives': 'MV', 'mexico': 'MX', 'marshall islands': 'MH', 'north macedonia': 'MK', 'mali': 'ML', 'malta': 'MT', 'myanmar': 'MM', 'montenegro': 'ME', 'mongolia': 'MN', 'northern mariana islands': 'MP', 'mozambique': 'MZ', 'mauritania': 'MR', 'montserrat': 'MS', 'martinique': 'MQ', 'mauritius': 'MU', 'malawi': 'MW', 'malaysia': 'MY', 'mayotte': 'YT', 'namibia': 'NA', 'new caledonia': 'NC', 'niger': 'NE', 'norfolk island': 'NF', 'nigeria': 'NG', 'nicaragua': 'NI', 'niue': 'NU', 'netherlands': 'NL', 'norway': 'NO', 'nepal': 'NP', 'nauru': 'NR', 'new zealand': 'NZ', 'oman': 'OM', 'pakistan': 'PK', 'panama': 'PA', 'pitcairn': 'PN', 'peru': 'PE', 'philippines': 'PH', 'palau': 'PW', 'papua new guinea': 'PG', 'poland': 'PL', 'puerto rico': 'PR', "korea, democratic people's republic of": 'KP', 'portugal': 'PT', 'paraguay': 'PY', 'palestine, state of': 'PS', 'french polynesia': 'PF', 'qatar': 'QA', 'réunion': 'RE', 'romania': 'RO', 'russian federation': 'RU', 'rwanda': 'RW', 'saudi arabia': 'SA', 'sudan': 'SD', 'senegal': 'SN', 'singapore': 'SG', 'south georgia and the south sandwich islands': 'GS', 'saint helena, ascension and tristan da cunha': 'SH', 'svalbard and jan mayen': 'SJ', 'solomon islands': 'SB', 'sierra leone': 'SL', 'el salvador': 'SV', 'san marino': 'SM', 'somalia': 'SO', 'saint pierre and miquelon': 'PM', 'serbia': 'RS', 'south sudan': 'SS', 'sao tome and principe': 'ST', 'suriname': 'SR', 'slovakia': 'SK', 'slovenia': 'SI', 'sweden': 'SE', 'eswatini': 'SZ', 'sint maarten (dutch part)': 'SX', 'seychelles': 'SC', 'syrian arab republic': 'SY', 'turks and caicos islands': 'TC', 'chad': 'TD', 'togo': 'TG', 'thailand': 'TH', 'tajikistan': 'TJ', 'tokelau': 'TK', 'turkmenistan': 'TM', 'timor-leste': 'TL', 'tonga': 'TO', 'trinidad and tobago': 'TT', 'tunisia': 'TN', 'türkiye': 'TR', 'tuvalu': 'TV', 'taiwan, province of china': 'TW', 'tanzania, united republic of': 'TZ', 'uganda': 'UG', 'ukraine': 'UA', 'united states minor outlying islands': 'UM', 'uruguay': 'UY', 'united states': 'US', 'uzbekistan': 'UZ', 'holy see (vatican city state)': 'VA', 'saint vincent and the grenadines': 'VC', 'venezuela, bolivarian republic of': 'VE', 'virgin islands, british': 'VG', 'virgin islands, u.s.': 'VI', 'viet nam': 'VN', 'vanuatu': 'VU', 'wallis and futuna': 'WF', 'samoa': 'WS', 'yemen': 'YE', 'south africa': 'ZA', 'zambia': 'ZM', 'zimbabwe': 'ZW', 'islamic republic of afghanistan': 'AF', 'republic of angola': 'AO', 'republic of albania': 'AL', 'principality of andorra': 'AD', 'argentine republic': 'AR', 'republic of armenia': 'AM', 'republic of austria': 'AT', 'republic of azerbaijan': 'AZ', 'republic of burundi': 'BI', 'kingdom of belgium': 'BE', 'republic of benin': 'BJ', "people's republic of bangladesh": 'BD', 'republic of bulgaria': 'BG', 'kingdom of bahrain': 'BH', 'commonwealth of the bahamas': 'BS', 'republic of bosnia and herzegovina': 'BA', 'republic of belarus': 'BY', 'plurinational state of bolivia': 'BO', 'bolivia': 'BO', 'federative republic of brazil': 'BR', 'kingdom of bhutan': 'BT', 'republic of botswana': 'BW', 'swiss confederation': 'CH', 'republic of chile': 'CL', "people's republic of china": 'CN', "republic of côte d'ivoire": 'CI', 'republic of cameroon': 'CM', 'republic of the congo': 'CG', 'republic of colombia': 'CO', 'union of the comoros': 'KM', 'republic of cabo verde': 'CV', 'republic of costa rica': 'CR', 'republic of cuba': 'CU', 'republic of cyprus': 'CY', 'czech republic': 'CZ', 'federal republic of germany': 'DE', 'republic of djibouti': 'DJ', 'commonwealth of dominica': 'DM', 'kingdom of denmark': 'DK', "people's democratic republic of algeria": 'DZ', 'republic of ecuador': 'EC', 'arab republic of egypt': 'EG', 'the state of eritrea': 'ER', 'kingdom of spain': 'ES', 'republic of estonia': 'EE', 'federal democratic republic of ethiopia': 'ET', 'republic of finland': 'FI', 'republic of fiji': 'FJ', 'french republic': 'FR', 'federated states of micronesia': 'FM', 'gabonese republic': 'GA', 'united kingdom of great britain and northern ireland': 'GB', 'republic of ghana': 'GH', 'republic of guinea': 'GN', 'republic of the gambia': 'GM', 'republic of guinea-bissau': 'GW', 'republic of equatorial guinea': 'GQ', 'hellenic republic': 'GR', 'republic of guatemala': 'GT', 'republic of guyana': 'GY', 'hong kong special administrative region of china': 'HK', 'republic of honduras': 'HN', 'republic of croatia': 'HR', 'republic of haiti': 'HT', 'republic of indonesia': 'ID', 'republic of india': 'IN', 'islamic republic of iran': 'IR', 'iran': 'IR', 'republic of iraq': 'IQ', 'republic of iceland': 'IS', 'state of israel': 'IL', 'italian republic': 'IT', 'hashemite kingdom of jordan': 'JO', 'republic of kazakhstan': 'KZ', 'republic of kenya': 'KE', 'kyrgyz republic': 'KG', 'kingdom of cambodia': 'KH', 'republic of kiribati': 'KI', 'south korea': 'KR', 'state of kuwait': 'KW', 'laos': 'LA', 'lebanese republic': 'LB', 'republic of liberia': 'LR', 'principality of liechtenstein': 'LI', 'democratic socialist republic of sri lanka': 'LK', 'kingdom of lesotho': 'LS', 'republic of lithuania': 'LT', 'grand duchy of luxembourg': 'LU', 'republic of latvia': 'LV', 'macao special administrative region of china': 'MO', 'kingdom of morocco': 'MA', 'principality of monaco': 'MC', 'republic of moldova': 'MD', 'moldova': 'MD', 'republic of madagascar': 'MG', 'republic of maldives': 'MV', 'united mexican states': 'MX', 'republic of the marshall islands': 'MH', 'republic of north macedonia': 'MK', 'republic of mali': 'ML', 'republic of malta': 'MT', 'republic of myanmar': 'MM', 'commonwealth of the northern mariana islands': 'MP', 'republic of mozambique': 'MZ', 'islamic republic of mauritania': 'MR', 'republic of mauritius': 'MU', 'republic of malawi': 'MW', 'republic of namibia': 'NA', 'republic of the niger': 'NE', 'federal republic of nigeria': 'NG', 'republic of nicaragua': 'NI', 'kingdom of the netherlands': 'NL', 'kingdom of norway': 'NO', 'federal democratic republic of nepal': 'NP', 'republic of nauru': 'NR', 'sultanate of oman': 'OM', 'islamic republic of pakistan': 'PK', 'republic of panama': 'PA', 'republic of peru': 'PE', 'republic of the philippines': 'PH', 'republic of palau': 'PW', 'independent state of papua new guinea': 'PG', 'republic of poland': 'PL', "democratic people's republic of korea": 'KP', 'north korea': 'KP', 'portuguese republic': 'PT', 'republic of paraguay': 'PY', 'the state of palestine': 'PS', 'state of qatar': 'QA', 'rwandese republic': 'RW', 'kingdom of saudi arabia': 'SA', 'republic of the sudan': 'SD', 'republic of senegal': 'SN', 'republic of singapore': 'SG', 'republic of sierra leone': 'SL', 'republic of el salvador': 'SV', 'republic of san marino': 'SM', 'federal republic of somalia': 'SO', 'republic of serbia': 'RS', 'republic of south sudan': 'SS', 'democratic republic of sao tome and principe': 'ST', 'republic of suriname': 'SR', 'slovak republic': 'SK', 'republic of slovenia': 'SI', 'kingdom of sweden': 'SE', 'kingdom of eswatini': 'SZ', 'republic of seychelles': 'SC', 'syria': 'SY', 'republic of chad': 'TD', 'togolese republic': 'TG', 'kingdom of thailand': 'TH', 'republic of tajikistan': 'TJ', 'democratic republic of timor-leste': 'TL', 'kingdom of tonga': 'TO', 'republic of trinidad and tobago': 'TT', 'republic of tunisia': 'TN', 'republic of türkiye': 'TR', 'taiwan': 'TW', 'united republic of tanzania': 'TZ', 'tanzania': 'TZ', 'republic of uganda': 'UG', 'eastern republic of uruguay': 'UY', 'united states of america': 'US', 'republic of uzbekistan': 'UZ', 'bolivarian republic of venezuela': 'VE', 'venezuela': 'VE', 'british virgin islands': 'VG', 'virgin islands of the united states': 'VI', 'socialist republic of viet nam': 'VN', 'vietnam': 'VN', 'republic of vanuatu': 'VU', 'independent state of samoa': 'WS', 'republic of yemen': 'YE', 'republic of south africa': 'ZA', 'republic of zambia': 'ZM', 'republic of zimbabwe': 'ZW', 'usa': 'US', 'uk': 'GB', 'england': 'GB', 'russia': 'RU', 'turkey': 'TR', 'palestine': 'PS', 'ivory coast': 'CI', 'uae': 'AE', 'kosovo': 'XK'}
+COUNTRY_NAME_TO_CODE = {'aruba': 'AW', 'afghanistan': 'AF', 'angola': 'AO', 'anguilla': 'AI', 'åland islands': 'AX', 'albania': 'AL', 'andorra': 'AD', 'united arab emirates': 'AE', 'argentina': 'AR', 'armenia': 'AM', 'american samoa': 'AS', 'antarctica': 'AQ', 'french southern territories': 'TF', 'antigua and barbuda': 'AG', 'australia': 'AU', 'austria': 'AT', 'azerbaijan': 'AZ', 'burundi': 'BI', 'belgium': 'BE', 'benin': 'BJ', 'bonaire, sint eustatius and saba': 'BQ', 'burkina faso': 'BF', 'bangladesh': 'BD', 'bulgaria': 'BG', 'bahrain': 'BH', 'bahamas': 'BS', 'bosnia and herzegovina': 'BA', 'saint barthélemy': 'BL', 'belarus': 'BY', 'belize': 'BZ', 'bermuda': 'BM', 'bolivia, plurinational state of': 'BO', 'brazil': 'BR', 'barbados': 'BB', 'brunei darussalam': 'BN', 'bhutan': 'BT', 'bouvet island': 'BV', 'botswana': 'BW', 'central african republic': 'CF', 'canada': 'CA', 'cocos (keeling) islands': 'CC', 'switzerland': 'CH', 'chile': 'CL', 'china': 'CN', "côte d'ivoire": 'CI', 'cameroon': 'CM', 'congo, the democratic republic of the': 'CD', 'congo': 'CG', 'cook islands': 'CK', 'colombia': 'CO', 'comoros': 'KM', 'cabo verde': 'CV', 'costa rica': 'CR', 'cuba': 'CU', 'curaçao': 'CW', 'christmas island': 'CX', 'cayman islands': 'KY', 'cyprus': 'CY', 'czechia': 'CZ', 'germany': 'DE', 'djibouti': 'DJ', 'dominica': 'DM', 'denmark': 'DK', 'dominican republic': 'DO', 'algeria': 'DZ', 'ecuador': 'EC', 'egypt': 'EG', 'eritrea': 'ER', 'western sahara': 'EH', 'spain': 'ES', 'estonia': 'EE', 'ethiopia': 'ET', 'finland': 'FI', 'fiji': 'FJ', 'falkland islands (malvinas)': 'FK', 'france': 'FR', 'faroe islands': 'FO', 'micronesia, federated states of': 'FM', 'gabon': 'GA', 'united kingdom': 'GB', 'georgia': 'GE', 'guernsey': 'GG', 'ghana': 'GH', 'gibraltar': 'GI', 'guinea': 'GN', 'guadeloupe': 'GP', 'gambia': 'GM', 'guinea-bissau': 'GW', 'equatorial guinea': 'GQ', 'greece': 'GR', 'grenada': 'GD', 'greenland': 'GL', 'guatemala': 'GT', 'french guiana': 'GF', 'guam': 'GU', 'guyana': 'GY', 'hong kong': 'HK', 'heard island and mcdonald islands': 'HM', 'honduras': 'HN', 'croatia': 'HR', 'haiti': 'HT', 'hungary': 'HU', 'indonesia': 'ID', 'isle of man': 'IM', 'india': 'IN', 'british indian ocean territory': 'IO', 'ireland': 'IE', 'iran, islamic republic of': 'IR', 'iraq': 'IQ', 'iceland': 'IS', 'israel': 'IL', 'italy': 'IT', 'jamaica': 'JM', 'jersey': 'JE', 'jordan': 'JO', 'japan': 'JP', 'kazakhstan': 'KZ', 'kenya': 'KE', 'kyrgyzstan': 'KG', 'cambodia': 'KH', 'kiribati': 'KI', 'saint kitts and nevis': 'KN', 'korea, republic of': 'KR', 'kuwait': 'KW', "lao people's democratic republic": 'LA', 'lebanon': 'LB', 'liberia': 'LR', 'libya': 'LY', 'saint lucia': 'LC', 'liechtenstein': 'LI', 'sri lanka': 'LK', 'lesotho': 'LS', 'lithuania': 'LT', 'luxembourg': 'LU', 'latvia': 'LV', 'macao': 'MO', 'saint martin (french part)': 'MF', 'morocco': 'MA', 'monaco': 'MC', 'moldova, republic of': 'MD', 'madagascar': 'MG', 'maldives': 'MV', 'mexico': 'MX', 'marshall islands': 'MH', 'north macedonia': 'MK', 'mali': 'ML', 'malta': 'MT', 'myanmar': 'MM', 'montenegro': 'ME', 'mongolia': 'MN', 'northern mariana islands': 'MP', 'mozambique': 'MZ', 'mauritania': 'MR', 'montserrat': 'MS', 'martinique': 'MQ', 'mauritius': 'MU', 'malawi': 'MW', 'malaysia': 'MY', 'mayotte': 'YT', 'namibia': 'NA', 'new caledonia': 'NC', 'niger': 'NE', 'norfolk island': 'NF', 'nigeria': 'NG', 'nicaragua': 'NI', 'niue': 'NU', 'netherlands': 'NL', 'norway': 'NO', 'nepal': 'NP', 'nauru': 'NR', 'new zealand': 'NZ', 'oman': 'OM', 'pakistan': 'PK', 'panama': 'PA', 'pitcairn': 'PN', 'peru': 'PE', 'philippines': 'PH', 'palau': 'PW', 'papua new guinea': 'PG', 'poland': 'PL', 'puerto rico': 'PR', "korea, democratic people's republic of": 'KP', 'portugal': 'PT', 'paraguay': 'PY', 'palestine, state of': 'PS', 'french polynesia': 'PF', 'qatar': 'QA', 'réunion': 'RE', 'romania': 'RO', 'russian federation': 'RU', 'rwanda': 'RW', 'saudi arabia': 'SA', 'sudan': 'SD', 'senegal': 'SN', 'singapore': 'SG', 'south georgia and the south sandwich islands': 'GS', 'saint helena, ascension and tristan da cunha': 'SH', 'svalbard and jan mayen': 'SJ', 'solomon islands': 'SB', 'sierra leone': 'SL', 'el salvador': 'SV', 'san marino': 'SM', 'somalia': 'SO', 'saint pierre and miquelon': 'PM', 'serbia': 'RS', 'south sudan': 'SS', 'sao tome and principe': 'ST', 'suriname': 'SR', 'slovakia': 'SK', 'slovenia': 'SI', 'sweden': 'SE', 'eswatini': 'SZ', 'sint maarten (dutch part)': 'SX', 'seychelles': 'SC', 'syrian arab republic': 'SY', 'turks and caicos islands': 'TC', 'chad': 'TD', 'togo': 'TG', 'thailand': 'TH', 'tajikistan': 'TJ', 'tokelau': 'TK', 'turkmenistan': 'TM', 'timor-leste': 'TL', 'tonga': 'TO', 'trinidad and tobago': 'TT', 'tunisia': 'TN', 'türkiye': 'TR', 'tuvalu': 'TV', 'taiwan, province of china': 'TW', 'tanzania, united republic of': 'TZ', 'uganda': 'UG', 'ukraine': 'UA', 'united states minor outlying islands': 'UM', 'uruguay': 'UY', 'united states': 'US', 'uzbekistan': 'UZ', 'holy see (vatican city state)': 'VA', 'saint vincent and the grenadines': 'VC', 'venezuela, bolivarian republic of': 'VE', 'virgin islands, british': 'VG', 'virgin islands, u.s.': 'VI', 'viet nam': 'VN', 'vanuatu': 'VU', 'wallis and futuna': 'WF', 'samoa': 'WS', 'yemen': 'YE', 'south africa': 'ZA', 'zambia': 'ZM', 'zimbabwe': 'ZW', 'islamic republic of afghanistan': 'AF', 'republic of angola': 'AO', 'republic of albania': 'AL', 'principality of andorra': 'AD', 'argentine republic': 'AR', 'republic of armenia': 'AM', 'republic of austria': 'AT', 'republic of azerbaijan': 'AZ', 'republic of burundi': 'BI', 'kingdom of belgium': 'BE', 'republic of benin': 'BJ', "people's republic of bangladesh": 'BD', 'republic of bulgaria': 'BG', 'kingdom of bahrain': 'BH', 'commonwealth of the bahamas': 'BS', 'republic of bosnia and herzegovina': 'BA', 'republic of belarus': 'BY', 'plurinational state of bolivia': 'BO', 'bolivia': 'BO', 'federative republic of brazil': 'BR', 'kingdom of bhutan': 'BT', 'republic of botswana': 'BW', 'swiss confederation': 'CH', 'republic of chile': 'CL', "people's republic of china": 'CN', "republic of côte d'ivoire": 'CI', 'republic of cameroon': 'CM', 'republic of the congo': 'CG', 'republic of colombia': 'CO', 'union of the comoros': 'KM', 'republic of cabo verde': 'CV', 'republic of costa rica': 'CR', 'republic of cuba': 'CU', 'republic of cyprus': 'CY', 'czech republic': 'CZ', 'federal republic of germany': 'DE', 'republic of djibouti': 'DJ', 'commonwealth of dominica': 'DM', 'kingdom of denmark': 'DK', "people's democratic republic of algeria": 'DZ', 'republic of ecuador': 'EC', 'arab republic of egypt': 'EG', 'the state of eritrea': 'ER', 'kingdom of spain': 'ES', 'republic of estonia': 'EE', 'federal democratic republic of ethiopia': 'ET', 'republic of finland': 'FI', 'republic of fiji': 'FJ', 'french republic': 'FR', 'federated states of micronesia': 'FM', 'gabonese republic': 'GA', 'united kingdom of great britain and northern ireland': 'GB', 'republic of ghana': 'GH', 'republic of guinea': 'GN', 'republic of the gambia': 'GM', 'republic of guinea-bissau': 'GW', 'republic of equatorial guinea': 'GQ', 'hellenic republic': 'GR', 'republic of guatemala': 'GT', 'republic of guyana': 'GY', 'hong kong special administrative region of china': 'HK', 'republic of honduras': 'HN', 'republic of croatia': 'HR', 'republic of haiti': 'HT', 'republic of indonesia': 'ID', 'republic of india': 'IN', 'islamic republic of iran': 'IR', 'iran': 'IR', 'republic of iraq': 'IQ', 'republic of iceland': 'IS', 'state of israel': 'IL', 'italian republic': 'IT', 'hashemite kingdom of jordan': 'JO', 'republic of kazakhstan': 'KZ', 'republic of kenya': 'KE', 'kyrgyz republic': 'KG', 'kingdom of cambodia': 'KH', 'republic of kiribati': 'KI', 'south korea': 'KR', 'state of kuwait': 'KW', 'laos': 'LA', 'lebanese republic': 'LB', 'republic of liberia': 'LR', 'principality of liechtenstein': 'LI', 'democratic socialist republic of sri lanka': 'LK', 'kingdom of lesotho': 'LS', 'republic of lithuania': 'LT', 'grand duchy of luxembourg': 'LU', 'republic of latvia': 'LV', 'macao special administrative region of china': 'MO', 'kingdom of morocco': 'MA', 'principality of monaco': 'MC', 'republic of moldova': 'MD', 'moldova': 'MD', 'republic of madagascar': 'MG', 'republic of maldives': 'MV', 'united mexican states': 'MX', 'republic of the marshall islands': 'MH', 'republic of north macedonia': 'MK', 'republic of mali': 'ML', 'republic of malta': 'MT', 'republic of myanmar': 'MM', 'commonwealth of the northern mariana islands': 'MP', 'republic of mozambique': 'MZ', 'islamic republic of mauritania': 'MR', 'republic of mauritius': 'MU', 'republic of malawi': 'MW', 'republic of namibia': 'NA', 'republic of the niger': 'NE', 'federal republic of nigeria': 'NG', 'republic of nicaragua': 'NI', 'kingdom of the netherlands': 'NL', 'kingdom of norway': 'NO', 'federal democratic republic of nepal': 'NP', 'republic of nauru': 'NR', 'sultanate of oman': 'OM', 'islamic republic of pakistan': 'PK', 'republic of panama': 'PA', 'republic of peru': 'PE', 'republic of the philippines': 'PH', 'republic of palau': 'PW', 'independent state of papua new guinea': 'PG', 'republic of poland': 'PL', "democratic people's republic of korea": 'KP', 'north korea': 'KP', 'portuguese republic': 'PT', 'republic of paraguay': 'PY', 'the state of palestine': 'PS', 'state of qatar': 'QA', 'rwandese republic': 'RW', 'kingdom of saudi arabia': 'SA', 'republic of the sudan': 'SD', 'republic of senegal': 'SN', 'republic of singapore': 'SG', 'republic of sierra leone': 'SL', 'republic of el salvador': 'SV', 'republic of san marino': 'SM', 'federal republic of somalia': 'SO', 'republic of serbia': 'RS', 'republic of south sudan': 'SS', 'democratic republic of sao tome and principe': 'ST', 'republic of suriname': 'SR', 'slovak republic': 'SK', 'republic of slovenia': 'SI', 'kingdom of sweden': 'SE', 'kingdom of eswatini': 'SZ', 'republic of seychelles': 'SC', 'syria': 'SY', 'republic of chad': 'TD', 'togolese republic': 'TG', 'kingdom of thailand': 'TH', 'republic of tajikistan': 'TJ', 'democratic republic of timor-leste': 'TL', 'kingdom of tonga': 'TO', 'republic of trinidad and tobago': 'TT', 'republic of tunisia': 'TN', 'republic of türkiye': 'TR', 'taiwan': 'TW', 'united republic of tanzania': 'TZ', 'tanzania': 'TZ', 'republic of uganda': 'UG', 'eastern republic of uruguay': 'UY', 'united states of america': 'US', 'republic of uzbekistan': 'UZ', 'bolivarian republic of venezuela': 'VE', 'venezuela': 'VE', 'british virgin islands': 'VG', 'virgin islands of the united states': 'VI', 'socialist republic of viet nam': 'VN', 'vietnam': 'VN', 'republic of vanuatu': 'VU', 'independent state of samoa': 'WS', 'republic of yemen': 'YE', 'republic of south africa': 'ZA', 'republic of zambia': 'ZM', 'republic of zimbabwe': 'ZW', 'usa': 'US', 'uk': 'GB', 'england': 'GB', 'russia': 'RU', 'turkey': 'TR', 'turkiye':'TR', 'curacao':'CW', 'curaçao':'CW', 'vatican city':'VA', 'vatican':'VA', 'palestine': 'PS', 'ivory coast': 'CI', 'uae': 'AE', 'kosovo': 'XK'}
 
 def country_flag(code):
     code=str(code or '').upper()
@@ -398,6 +401,53 @@ def xtream_api(action, **kwargs):
     return json.loads(raw)
 
 
+def balanced_selection(items, category_names, limit):
+    """Spread a capped catalog across all source categories, retaining source order."""
+    if limit <= 0:return []
+    if limit >= len(items):return items
+    from collections import defaultdict, deque
+    buckets=defaultdict(deque)
+    for item in items:
+        if isinstance(item,dict):
+            buckets[str(item.get('category_id','unknown'))].append(item)
+    # Languages with explicit source labels get early slots, but all categories participate.
+    def priority(cid):
+        name=str(category_names.get(cid,'')).casefold()
+        if re.search(r'persian|farsi|فارسی|ایرانی|iran|\bfa\b|\bper\b',name):return 0
+        if re.search(r'english|anglais|\ben\b|\buk\b|\busa\b',name):return 1
+        if re.search(r'french|français|\bfr\b',name):return 2
+        return 3
+    order=sorted(buckets,key=lambda c:(priority(c),c))
+    result=[]
+    while order and len(result)<limit:
+        next_order=[]
+        for cid in order:
+            if len(result)>=limit:break
+            bucket=buckets[cid]
+            if bucket:result.append(bucket.popleft())
+            if bucket:next_order.append(cid)
+        order=next_order
+    return result
+
+
+def epg_from_upstream(sid, action, limit='20'):
+    """Forward authorized EPG metadata, without exposing upstream credentials."""
+    with LOCK:
+        upstream_id=UPSTREAM_LIVE_IDS.get(sid)
+        cached=EPG_CACHE.get((sid,action))
+    if upstream_id is None:return {'epg_listings':[]}
+    if cached and time.time()-cached[0]<EPG_CACHE_TTL:return cached[1]
+    try:
+        kwargs={'stream_id':upstream_id}
+        if action=='get_short_epg':kwargs['limit']=str(max(1,min(int(limit),50)))
+        result=xtream_api(action,**kwargs)
+        if not isinstance(result,dict):result={'epg_listings':[]}
+        with LOCK:EPG_CACHE[(sid,action)]=(time.time(),result)
+        return result
+    except Exception as exc:
+        print('EPG lookup error',type(exc).__name__,flush=True)
+        return {'epg_listings':[]}
+
 def xtream_catalog():
     """Build limited, read-only upstream catalog. Does not download media."""
     if not XTREAM_READY:return
@@ -414,7 +464,7 @@ def xtream_catalog():
         series_names={str(x.get('category_id')):str(x.get('category_name','OTHER')) for x in series_categories if isinstance(x,dict)}
         # Upstream ids are namespaced to avoid collisions with independent media.
         mrows=[];minfo={};murls={};mcats={};srows=[];sinfo={};surls={};scats={};lrows=[];lurls={};lcats={}
-        for item in movies[:XTREAM_MOVIE_LIMIT]:
+        for item in balanced_selection(movies,movie_names,XTREAM_MOVIE_LIMIT):
             try:
                 upstream_id=int(item['stream_id']);title=str(item.get('name','')).strip()
                 if not title:continue
@@ -435,7 +485,7 @@ def xtream_catalog():
                 UPSTREAM_MOVIE_IDS[sid]=upstream_id
                 murls[sid]=('movie',upstream_id,ext)
             except (KeyError,ValueError,TypeError):continue
-        for item in series[:XTREAM_SERIES_LIMIT]:
+        for item in balanced_selection(series,series_names,XTREAM_SERIES_LIMIT):
             try:
                 upstream_id=int(item['series_id']);title=str(item.get('name','')).strip()
                 if not title:continue
@@ -469,6 +519,7 @@ def xtream_catalog():
                     'category_id':lcats[group],'custom_sid':'','tv_archive':0,'direct_source':'',
                     'tv_archive_duration':0,'container_extension':'ts'})
                 lurls[sid]=('live',upstream_id,'ts')
+                UPSTREAM_LIVE_IDS[sid]=upstream_id
             except (KeyError,ValueError,TypeError):continue
         # Keep upstream catalog separate from public scans. Public scan snapshots
         # can update at any time without erasing upstream entries.
@@ -654,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
         vod['series_info']={**vod['series_info'],**extra['series_info']}
         vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.9',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'4.0',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -675,10 +726,12 @@ class Handler(BaseHTTPRequestHandler):
                     'password_present': bool(XTREAM_PASSWORD),
                     'ready': bool(XTREAM_READY)
                 },
-                'xtream':upstream_meta})
+                'xtream':upstream_meta,
+                'catalog_limits':{'live':XTREAM_LIVE_LIMIT,'movies':XTREAM_MOVIE_LIMIT,'series':XTREAM_SERIES_LIMIT},
+                'epg':{'upstream_on_demand':bool(XTREAM_READY),'xmltv_configured':False}})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'3.9','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'4.0','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -725,7 +778,10 @@ class Handler(BaseHTTPRequestHandler):
             try:sid=int(get('series_id'))
             except ValueError:return self.reply({})
             return self.reply(series_details(sid) if sid in UPSTREAM_SERIES_IDS else (vod['series_info'].get(sid) or {}))
-        if action in ('get_short_epg','get_simple_data_table'):return self.reply({'epg_listings':[]})
+        if action in ('get_short_epg','get_simple_data_table'):
+            try:sid=int(get('stream_id'))
+            except (ValueError,TypeError):return self.reply({'epg_listings':[]})
+            return self.reply(epg_from_upstream(sid,action,get('limit') or '20'))
         public=urllib.parse.urlsplit(PUBLIC_URL);secure=public.scheme=='https'
         return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,
             'status':'Active','exp_date':None,'is_trial':'0','active_cons':'0','max_connections':'1',
@@ -740,5 +796,5 @@ if __name__=='__main__':
     if XTREAM_READY:
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v3.8 running on',HOST,PORT,flush=True)
+    print('OG IPTV v4.0 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
