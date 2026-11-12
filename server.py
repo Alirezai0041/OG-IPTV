@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.2 - public playlist validation and Xtream-compatible API."""
+"""OG IPTV 3.3 - public playlist validation and Xtream-compatible API."""
 import os, re, json, time, hashlib, urllib.request, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +11,7 @@ USER=os.getenv('IPTV_USER','ogdemo')
 PASSWORD=os.getenv('IPTV_PASSWORD','change-me-now')
 PUBLIC_URL=os.getenv('PUBLIC_URL','https://og-iptv.onrender.com').rstrip('/')
 CACHE_SECONDS=int(os.getenv('CACHE_SECONDS','3600'))
-MAX_CHECKS=max(1,int(os.getenv('MAX_CHECKS','80')))
+MAX_CHECKS=max(1,int(os.getenv('MAX_CHECKS','400')))
 WORKERS=max(1,min(int(os.getenv('CHECK_WORKERS','16')),20))
 SOURCES={
  'IR':'https://iptv-org.github.io/iptv/countries/ir.m3u',
@@ -25,8 +25,26 @@ SOURCES={
  'SP':'https://iptv-org.github.io/iptv/categories/sports.m3u',
  'MU':'https://iptv-org.github.io/iptv/categories/music.m3u',
  'MV':'https://iptv-org.github.io/iptv/categories/movies.m3u',
+ 'CA':'https://iptv-org.github.io/iptv/countries/ca.m3u',
+ 'ES':'https://iptv-org.github.io/iptv/countries/es.m3u',
+ 'IT':'https://iptv-org.github.io/iptv/countries/it.m3u',
+ 'IN':'https://iptv-org.github.io/iptv/countries/in.m3u',
+ 'AE':'https://iptv-org.github.io/iptv/countries/ae.m3u',
+ 'AF':'https://iptv-org.github.io/iptv/countries/af.m3u',
+ 'PK':'https://iptv-org.github.io/iptv/countries/pk.m3u',
+ 'JP':'https://iptv-org.github.io/iptv/countries/jp.m3u',
+ 'KR':'https://iptv-org.github.io/iptv/countries/kr.m3u',
+ 'BR':'https://iptv-org.github.io/iptv/countries/br.m3u',
+ 'AR':'https://iptv-org.github.io/iptv/countries/ar.m3u',
+ 'NL':'https://iptv-org.github.io/iptv/countries/nl.m3u',
+ 'SE':'https://iptv-org.github.io/iptv/countries/se.m3u',
+ 'NO':'https://iptv-org.github.io/iptv/countries/no.m3u',
+ 'AU':'https://iptv-org.github.io/iptv/countries/au.m3u',
+ 'NEWS':'https://iptv-org.github.io/iptv/categories/news.m3u',
+ 'KIDS':'https://iptv-org.github.io/iptv/categories/kids.m3u',
+ 'DOC':'https://iptv-org.github.io/iptv/categories/documentary.m3u',
 }
-NAMES={'IR':'🇮🇷 IRAN','FR':'🇫🇷 FRANCE','GB':'🇬🇧 UNITED KINGDOM','US':'🇺🇸 USA','DE':'🇩🇪 GERMANY','TR':'🇹🇷 TURKEY','CH':'🇨🇭 SWITZERLAND','FA':'🌐 PERSIAN','SP':'⚽ SPORTS','MU':'🎵 MUSIC','MV':'🎬 MOVIES','AD':'🔞 ADULT 18+'}
+NAMES={'IR':'🇮🇷 IRAN','FR':'🇫🇷 FRANCE','GB':'🇬🇧 UNITED KINGDOM','US':'🇺🇸 USA','DE':'🇩🇪 GERMANY','TR':'🇹🇷 TURKEY','CH':'🇨🇭 SWITZERLAND','FA':'🌐 PERSIAN','SP':'⚽ SPORTS','MU':'🎵 MUSIC','MV':'🎬 MOVIES','CA':'🇨🇦 CANADA','ES':'🇪🇸 SPAIN','IT':'🇮🇹 ITALY','IN':'🇮🇳 INDIA','AE':'🇦🇪 UAE','AF':'🇦🇫 AFGHANISTAN','PK':'🇵🇰 PAKISTAN','JP':'🇯🇵 JAPAN','KR':'🇰🇷 KOREA','BR':'🇧🇷 BRAZIL','AR':'🇦🇷 ARGENTINA','NL':'🇳🇱 NETHERLANDS','SE':'🇸🇪 SWEDEN','NO':'🇳🇴 NORWAY','AU':'🇦🇺 AUSTRALIA','NEWS':'📰 NEWS','KIDS':'🧸 KIDS','DOC':'🌍 DOCUMENTARY','AD':'🔞 ADULT 18+'}
 KEYS=list(SOURCES)+['AD']
 CATEGORIES=[{'category_id':str(i),'category_name':NAMES[k],'parent_id':0} for i,k in enumerate(KEYS,1)]
 ADULT_PLAYLIST_URL=os.getenv('ADULT_PLAYLIST_URL','').strip()
@@ -34,7 +52,7 @@ CACHE={'at':0,'streams':[],'urls':{},'stats':{},'checking':False}
 LOCK=Lock()
 
 def fetch_text(url,limit=8000000):
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.1','Accept':'*/*'})
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.3','Accept':'*/*'})
     with urllib.request.urlopen(req,timeout=15) as r:
         return r.read(limit).decode('utf-8','replace')
 
@@ -110,7 +128,7 @@ def load():
                 streams.append({'num':len(streams)+1,'name':name,'stream_type':'live','stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0','category_id':str(KEYS.index(key)+1),'custom_sid':'','tv_archive':0,'direct_source':url,'tv_archive_duration':0,'container_extension':'m3u8'})
                 urls[sid]=url
             CACHE.update(at=time.time(),streams=streams,urls=urls,stats=stats)
-            print('OG IPTV 3.2 checked',len(selected),'accepted',len(streams),flush=True)
+            print('OG IPTV 3.3 checked',len(selected),'accepted',len(streams),flush=True)
         finally:
             CACHE['checking']=False
 
@@ -131,11 +149,11 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.parse_qs(parsed.query)
         get=lambda key:p.get(key,[''])[0]
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.2','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.3','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
             load()
-            return self.reply({'version':'3.2','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
+            return self.reply({'version':'3.3','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
         # Smarters can request /USERNAME/PASSWORD/STREAM_ID (no /live prefix).
         # Also preserve the /live/USERNAME/PASSWORD/STREAM_ID.m3u8 route.
         parts=path.strip('/').split('/')
