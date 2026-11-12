@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.1 - public playlist validation and Xtream-compatible API."""
+"""OG IPTV 3.2 - public playlist validation and Xtream-compatible API."""
 import os, re, json, time, hashlib, urllib.request, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -103,12 +103,14 @@ def load():
             good.sort(key=lambda x:(KEYS.index(x[0]),x[1].lower()))
             streams=[]; urls={}
             for key,name,logo,url in good:
-                sid=int(hashlib.sha256((key+'|'+url).encode()).hexdigest()[:12],16)
+                sid=(int(hashlib.sha256((key+'|'+url).encode()).hexdigest()[:8],16) & 0x7fffffff) or 1
+                while sid in urls and urls[sid] != url:
+                    sid=(sid % 0x7fffffff)+1
                 stats[key]['accepted']+=1
                 streams.append({'num':len(streams)+1,'name':name,'stream_type':'live','stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0','category_id':str(KEYS.index(key)+1),'custom_sid':'','tv_archive':0,'direct_source':url,'tv_archive_duration':0,'container_extension':'m3u8'})
                 urls[sid]=url
             CACHE.update(at=time.time(),streams=streams,urls=urls,stats=stats)
-            print('OG IPTV 3.1 checked',len(selected),'accepted',len(streams),flush=True)
+            print('OG IPTV 3.2 checked',len(selected),'accepted',len(streams),flush=True)
         finally:
             CACHE['checking']=False
 
@@ -129,11 +131,11 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.parse_qs(parsed.query)
         get=lambda key:p.get(key,[''])[0]
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.1','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.2','streams_loaded':len(CACHE['streams']),'last_scan':int(CACHE['at']),'adult_playlist_configured':bool(ADULT_PLAYLIST_URL)})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
             load()
-            return self.reply({'version':'3.1','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
+            return self.reply({'version':'3.2','note':'HTTP probe only; playback not guaranteed','stats':CACHE['stats'],'accepted_total':len(CACHE['streams'])})
         # Smarters can request /USERNAME/PASSWORD/STREAM_ID (no /live prefix).
         # Also preserve the /live/USERNAME/PASSWORD/STREAM_ID.m3u8 route.
         parts=path.strip('/').split('/')
@@ -175,5 +177,5 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,'status':'Active','exp_date':None,'is_trial':'0','active_cons':'0','max_connections':'1','allowed_output_formats':['m3u8']},'server_info':{'url':public.hostname,'port':str(public.port or (443 if secure else 80)),'https_port':'443' if secure else '', 'server_protocol':public.scheme,'timezone':'Europe/Zurich','timestamp_now':int(time.time())}})
 
 if __name__=='__main__':
-    print('OG IPTV v3.1 running on',HOST,PORT,flush=True)
+    print('OG IPTV v3.2 running on',HOST,PORT,flush=True)
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
