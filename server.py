@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OG IPTV 3.7.1: incremental public live TV + licensed VOD/series Xtream API.
+"""OG IPTV 3.8: incremental public live TV + licensed VOD/series Xtream API.
 
 VOD_JSON_URL / SERIES_JSON_URL point to JSON catalogs of content you can stream.
 Optional Internet Archive discovery is limited to explicitly public-domain/CC0 items.
@@ -15,7 +15,7 @@ USER=os.getenv('IPTV_USER','ogdemo'); PASSWORD=os.getenv('IPTV_PASSWORD','change
 PUBLIC_URL=os.getenv('PUBLIC_URL','https://og-iptv.onrender.com').rstrip('/')
 CACHE_SECONDS=max(600,int(os.getenv('CACHE_SECONDS','21600')))
 WORKERS=max(1,min(int(os.getenv('CHECK_WORKERS','12')),24))
-MIN_HEIGHT=max(1080,int(os.getenv('MIN_HEIGHT','1080')))
+MIN_HEIGHT=max(0,int(os.getenv('MIN_HEIGHT','0')))  # 0 includes playable SD/HD streams
 MAX_CHECKS=max(0,int(os.getenv('MAX_CHECKS','0')))
 ADULT_PLAYLIST_URL=os.getenv('ADULT_PLAYLIST_URL','').strip()
 VOD_JSON_URL=os.getenv('VOD_JSON_URL','').strip()
@@ -27,11 +27,12 @@ XTREAM_URL=os.getenv('XTREAM_URL','').rstrip('/')
 XTREAM_USER=os.getenv('XTREAM_USER','')
 XTREAM_PASSWORD=os.getenv('XTREAM_PASSWORD','')
 XTREAM_ENABLED=os.getenv('XTREAM_ENABLED','0')=='1'
-XTREAM_MOVIE_LIMIT=max(0,min(int(os.getenv('XTREAM_MOVIE_LIMIT','500')),5000))
-XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','30')),1000))
-XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','0')),1000))
+XTREAM_MOVIE_LIMIT=max(0,min(int(os.getenv('XTREAM_MOVIE_LIMIT','1000')),30000))
+XTREAM_SERIES_LIMIT=max(0,min(int(os.getenv('XTREAM_SERIES_LIMIT','500')),10000))
+XTREAM_LIVE_LIMIT=max(0,min(int(os.getenv('XTREAM_LIVE_LIMIT','1000')),25000))
 XTREAM_READY=XTREAM_ENABLED and all((XTREAM_URL,XTREAM_USER,XTREAM_PASSWORD))
 UPSTREAM={'live':{},'movie':{},'series':{}}
+UPSTREAM_SERIES_IDS={}
 UPSTREAM_ROWS={'live':[],'live_categories':[],'movies':[],'movie_info':{},'movie_categories':[],
                'series':[],'series_info':{},'series_categories':[]}
 UPSTREAM_META={'status':'disabled','movies':0,'series':0,'live':0,'error':None}
@@ -55,7 +56,7 @@ def valid_http(url):
 
 def request(url,timeout=9,limit=16000000):
     if not valid_http(url):raise ValueError('Invalid URL')
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.7','Accept':'*/*'})
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 OG-IPTV/3.8','Accept':'*/*'})
     with urllib.request.urlopen(req,timeout=timeout) as r:
         return r.read(limit),r.headers.get('Content-Type',''),r.geturl()
 
@@ -93,12 +94,43 @@ def check_live(url):
                     absolute=urllib.parse.urljoin(final,candidate)
                     if valid_http(absolute):variants.append((absolute,w,h))
                     break
+        if not variants and '#EXTINF:' in text and '#EXT-X-' in text and MIN_HEIGHT==0:
+            variants.append((final,0,0))
         return variants
     except Exception:return []
 
+COUNTRY_CODES = {'AF':'🇦🇫','IR':'🇮🇷','FR':'🇫🇷','CH':'🇨🇭','DE':'🇩🇪','GB':'🇬🇧',
+ 'UK':'🇬🇧','US':'🇺🇸','TR':'🇹🇷','IN':'🇮🇳','CA':'🇨🇦','AU':'🇦🇺','ES':'🇪🇸',
+ 'IT':'🇮🇹','PT':'🇵🇹','BR':'🇧🇷','RU':'🇷🇺','JP':'🇯🇵','KR':'🇰🇷','CN':'🇨🇳',
+ 'PK':'🇵🇰','AE':'🇦🇪','SA':'🇸🇦','IQ':'🇮🇶','SY':'🇸🇾','EG':'🇪🇬','MA':'🇲🇦',
+ 'NL':'🇳🇱','BE':'🇧🇪','AT':'🇦🇹','SE':'🇸🇪','NO':'🇳🇴','DK':'🇩🇰','FI':'🇫🇮',
+ 'PL':'🇵🇱','GR':'🇬🇷','UA':'🇺🇦','MX':'🇲🇽','AR':'🇦🇷','CO':'🇨🇴','ZA':'🇿🇦'}
+COUNTRY_NAMES={'afghanistan':'AF','iran':'IR','france':'FR','switzerland':'CH',
+ 'germany':'DE','united kingdom':'GB','great britain':'GB','usa':'US',
+ 'united states':'US','turkey':'TR','india':'IN','canada':'CA','australia':'AU',
+ 'spain':'ES','italy':'IT','portugal':'PT','brazil':'BR','russia':'RU',
+ 'japan':'JP','south korea':'KR','china':'CN','pakistan':'PK',
+ 'united arab emirates':'AE','saudi arabia':'SA','iraq':'IQ','syria':'SY',
+ 'egypt':'EG','morocco':'MA','netherlands':'NL','belgium':'BE','austria':'AT',
+ 'sweden':'SE','norway':'NO','denmark':'DK','finland':'FI','poland':'PL',
+ 'greece':'GR','ukraine':'UA','mexico':'MX','argentina':'AR',
+ 'colombia':'CO','south africa':'ZA'}
+def flag_label(label):
+    name=str(label or '').strip()
+    if not name:return 'OTHER'
+    if any(ch in name for ch in COUNTRY_CODES.values()):return name
+    plain=re.sub(r'^[^\w]+','',name).strip()
+    m=re.match(r'^([A-Za-z]{2})(?:\s*[-|:]|$)',plain)
+    code=m.group(1).upper() if m else COUNTRY_NAMES.get(plain.casefold())
+    if not code:
+        for country,cc in COUNTRY_NAMES.items():
+            if plain.casefold().startswith(country+' ') or plain.casefold().startswith(country+' -'):
+                code=cc;break
+    return (COUNTRY_CODES.get(code,'')+' '+name).strip() if code in COUNTRY_CODES else name
+
 def category_for(entry):
     if entry[0]=='ADULT':return ADULT_NAME
-    return ('🌍 ' if entry[0]=='COUNTRIES' else '📺 ')+entry[1]
+    return flag_label(entry[1]) if entry[0]=='COUNTRIES' else '📺 '+entry[1]
 
 def stable_id(seed):
     return (int(hashlib.sha256(seed.encode()).hexdigest()[:8],16)&0x7fffffff) or 1
@@ -114,8 +146,8 @@ def publish_live(records,stats,checked,total,done=False,error=None):
     for category,name,logo,url,w,h,source in ordered:
         sid=stable_id(category+'|'+url)
         while sid in urls and urls[sid]!=url:sid=(sid%0x7fffffff)+1
-        quality='4K' if h>=2160 else ('1440p' if h>=1440 else '1080p')
-        streams.append({'num':len(streams)+1,'name':f'{name} [{quality}]','stream_type':'live',
+        quality='4K' if h>=2160 else ('1440p' if h>=1440 else ('1080p' if h>=1080 else ('720p' if h>=720 else ''))) 
+        streams.append({'num':len(streams)+1,'name':f'{name} [{quality}]' if quality else name,'stream_type':'live',
                         'stream_id':sid,'stream_icon':logo,'epg_channel_id':'','added':'0',
                         'category_id':ids[category],'custom_sid':'','tv_archive':0,
                         'direct_source':'','tv_archive_duration':0,'container_extension':'m3u8'})
@@ -364,7 +396,7 @@ def xtream_api(action, **kwargs):
     query={'username':XTREAM_USER,'password':XTREAM_PASSWORD,'action':action}
     query.update(kwargs)
     url=XTREAM_URL+'/player_api.php?'+urllib.parse.urlencode(query)
-    raw,_,_=request(url,timeout=45,limit=80000000)
+    raw,_,_=request(url,timeout=45,limit=160000000)
     return json.loads(raw)
 
 
@@ -373,11 +405,13 @@ def xtream_catalog():
     if not XTREAM_READY:return
     try:
         with LOCK:UPSTREAM_META.update(status='loading',error=None)
+        live_categories=xtream_api('get_live_categories') if XTREAM_LIVE_LIMIT else []
         movie_categories=xtream_api('get_vod_categories')
         series_categories=xtream_api('get_series_categories')
         movies=xtream_api('get_vod_streams')
         series=xtream_api('get_series')
         live=xtream_api('get_live_streams') if XTREAM_LIVE_LIMIT else []
+        live_names={str(x.get('category_id')):str(x.get('category_name','LIVE')) for x in live_categories if isinstance(x,dict)}
         movie_names={str(x.get('category_id')):str(x.get('category_name','OTHER')) for x in movie_categories if isinstance(x,dict)}
         series_names={str(x.get('category_id')):str(x.get('category_name','OTHER')) for x in series_categories if isinstance(x,dict)}
         # Upstream ids are namespaced to avoid collisions with independent media.
@@ -390,7 +424,7 @@ def xtream_catalog():
                 if ext not in ('mp4','mkv','avi','ts'):continue
                 sid=stable_id('xtream-movie|'+str(upstream_id))
                 while sid in murls:sid=(sid%0x7fffffff)+1
-                group='POWERDINO | '+movie_names.get(str(item.get('category_id')),'MOVIES')
+                group='POWERDINO | '+flag_label(movie_names.get(str(item.get('category_id')),'MOVIES'))
                 mcats.setdefault(group,str(800000+len(mcats)))
                 mrows.append({'num':len(mrows)+1,'name':title,'stream_type':'movie','stream_id':sid,
                     'stream_icon':item.get('stream_icon',''),'rating':'','rating_5based':0,
@@ -406,33 +440,15 @@ def xtream_catalog():
                 upstream_id=int(item['series_id']);title=str(item.get('name','')).strip()
                 if not title:continue
                 sid=stable_id('xtream-series|'+str(upstream_id))
-                group='POWERDINO | '+series_names.get(str(item.get('category_id')),'SERIES')
+                group='POWERDINO | '+flag_label(series_names.get(str(item.get('category_id')),'SERIES'))
                 scats.setdefault(group,str(810000+len(scats)))
-                details=xtream_api('get_series_info',series_id=upstream_id)
-                episodes={};seasons=[]
-                for season,eps in (details.get('episodes') or {}).items():
-                    if not isinstance(eps,list):continue
-                    rows=[]
-                    for ep in eps:
-                        try:
-                            eid0=int(ep['id']);ext=str(ep.get('container_extension') or 'mp4').lower()
-                            if ext not in ('mp4','mkv','avi','ts'):continue
-                            eid=stable_id('xtream-episode|'+str(eid0))
-                            while eid in surls:eid=(eid%0x7fffffff)+1
-                            surls[eid]=('series',eid0,ext)
-                            rows.append({'id':str(eid),'episode_num':int(ep.get('episode_num') or len(rows)+1),
-                                'title':str(ep.get('title') or 'Episode'), 'container_extension':ext,
-                                'info':{'movie_image':item.get('cover',''),'plot':''}})
-                        except (ValueError,KeyError,TypeError):continue
-                    if rows:
-                        episodes[str(season)]=rows
-                        seasons.append({'season_number':int(season),'name':'Season '+str(season),
-                            'episode_count':len(rows),'cover':item.get('cover','')})
-                if not episodes:continue
-                sinfo[sid]={'info':details.get('info') or {'name':title},'seasons':seasons,'episodes':episodes}
-                srows.append({'num':len(srows)+1,'name':title,'series_id':sid,'cover':item.get('cover',''),
-                    'plot':item.get('plot',''),'genre':item.get('genre',''),
-                    'releaseDate':item.get('releaseDate',''),'rating':'','category_id':scats[group]})
+                # Load seasons and episodes on demand to avoid thousands of requests at startup.
+                sinfo[sid]=None
+                UPSTREAM_SERIES_IDS[sid]=upstream_id
+                srows.append({'num':len(srows)+1,'name':title,'series_id':sid,
+                    'cover':item.get('cover',''),'plot':item.get('plot',''),
+                    'genre':item.get('genre',''),'releaseDate':item.get('releaseDate',''),
+                    'rating':item.get('rating',''),'category_id':scats[group]})
             except (ValueError,KeyError,TypeError):continue
         for item in live[:XTREAM_LIVE_LIMIT]:
             try:
@@ -440,8 +456,8 @@ def xtream_catalog():
                 if not title:continue
                 sid=stable_id('xtream-live|'+str(upstream_id))
                 while sid in lurls:sid=(sid%0x7fffffff)+1
-                group='POWERDINO | LIVE'
-                lcats.setdefault(group,'820000')
+                group='POWERDINO | '+flag_label(live_names.get(str(item.get('category_id')),'LIVE'))
+                lcats.setdefault(group,str(820000+len(lcats)))
                 lrows.append({'num':len(lrows)+1,'name':title,'stream_type':'live','stream_id':sid,
                     'stream_icon':item.get('stream_icon',''),'epg_channel_id':'','added':'0',
                     'category_id':lcats[group],'custom_sid':'','tv_archive':0,'direct_source':'',
@@ -465,6 +481,45 @@ def xtream_catalog():
         print('Xtream catalog error',type(exc).__name__,flush=True)
 
 
+def series_details(sid):
+    # Server-side mapping is derived from published series rows (never from a client URL).
+    upstream_id=None
+    with LOCK:
+        if sid in UPSTREAM_ROWS['series_info'] and UPSTREAM_ROWS['series_info'][sid] is not None:
+            return UPSTREAM_ROWS['series_info'][sid]
+        upstream_id=UPSTREAM_SERIES_IDS.get(sid)
+    if upstream_id is None:return {}
+    try:
+        details=xtream_api('get_series_info',series_id=upstream_id)
+        episodes={};seasons=[];new_urls={}
+        for season,eps in (details.get('episodes') or {}).items():
+            if not isinstance(eps,list):continue
+            rows=[]
+            for ep in eps:
+                try:
+                    original=int(ep['id']);ext=str(ep.get('container_extension') or 'mp4').lower()
+                    if ext not in ('mp4','mkv','avi','ts'):continue
+                    eid=stable_id('xtream-episode|'+str(original))
+                    new_urls[eid]=('series',original,ext)
+                    rows.append({'id':str(eid),'episode_num':int(ep.get('episode_num') or len(rows)+1),
+                                 'title':str(ep.get('title') or 'Episode'), 'container_extension':ext,
+                                 'info':{'movie_image':str(ep.get('info',{}).get('movie_image','') if isinstance(ep.get('info'),dict) else ''),
+                                         'plot':''}})
+                except (ValueError,KeyError,TypeError):continue
+            if rows:
+                episodes[str(season)]=rows
+                try:n=int(season)
+                except (ValueError,TypeError):n=1
+                seasons.append({'season_number':n,'name':'Season '+str(season),'episode_count':len(rows),'cover':''})
+        result={'info':details.get('info') or {},'seasons':seasons,'episodes':episodes}
+        with LOCK:
+            UPSTREAM['series'].update(new_urls)
+            UPSTREAM_ROWS['series_info'][sid]=result
+        return result
+    except Exception as e:
+        print('Series info error',type(e).__name__,flush=True)
+        return {}
+
 def background_xtream():
     # Catalog metadata loads independently; no waiting for public scan.
     xtream_catalog()
@@ -483,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
         # Upstream is configured by the server operator, not by the requester.
         url=(XTREAM_URL+'/'+kind+'/'+urllib.parse.quote(XTREAM_USER,safe='')+'/'+
              urllib.parse.quote(XTREAM_PASSWORD,safe='')+'/'+str(upstream_id)+'.'+ext)
-        headers={'User-Agent':'OG-IPTV/3.7'}
+        headers={'User-Agent':'OG-IPTV/3.8'}
         if self.headers.get('Range'):headers['Range']=self.headers['Range']
         try:
             req=urllib.request.Request(url,headers=headers)
@@ -521,7 +576,7 @@ class Handler(BaseHTTPRequestHandler):
         vod['series_info']={**vod['series_info'],**extra['series_info']}
         vod['series_categories']=vod['series_categories']+extra['series_categories']
         if path in ('/','/health'):
-            return self.reply({'ok':True,'name':'OG IPTV','version':'3.7.1',
+            return self.reply({'ok':True,'name':'OG IPTV','version':'3.8',
                 'streams_loaded':len(live['streams']),'last_scan':int(live['at']),
                 'scanning':live['checking'],'scan_error':live['error'],
                 'scan_checked':live['checked'],'scan_total':live['total'],
@@ -545,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
                 'xtream':upstream_meta})
         if path=='/diagnostics':
             if get('username')!=USER or get('password')!=PASSWORD:return self.reply({'error':'Unauthorized'},401)
-            return self.reply({'version':'3.7.1','stats':live['stats'],'checked':live['checked'],
+            return self.reply({'version':'3.8','stats':live['stats'],'checked':live['checked'],
                 'total':live['total'],'accepted_total':len(live['streams']),
                 'scanning':live['checking'],'vod_sources':vod['sources'],
                 'vod_rejected':vod['rejected'],'vod_error':vod['error']})
@@ -591,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
         if action=='get_series_info':
             try:sid=int(get('series_id'))
             except ValueError:return self.reply({})
-            return self.reply(vod['series_info'].get(sid,{}))
+            return self.reply(series_details(sid) if sid in UPSTREAM_SERIES_IDS else (vod['series_info'].get(sid) or {}))
         if action in ('get_short_epg','get_simple_data_table'):return self.reply({'epg_listings':[]})
         public=urllib.parse.urlsplit(PUBLIC_URL);secure=public.scheme=='https'
         return self.reply({'user_info':{'username':USER,'password':PASSWORD,'auth':1,
@@ -607,5 +662,5 @@ if __name__=='__main__':
     if XTREAM_READY:
         with LOCK:UPSTREAM_META['status']='loading'
         Thread(target=background_xtream,daemon=True).start()
-    print('OG IPTV v3.7.1 running on',HOST,PORT,flush=True)
-    ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
+    print('OG IPTV v3.8 running on',HOST,PORT,flush=True)
+    ThreadingHTTPServer((HOST,PORT),Handler).serve
