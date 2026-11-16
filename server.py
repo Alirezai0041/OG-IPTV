@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, as_com
 from threading import RLock, Thread, BoundedSemaphore
 from collections import defaultdict, deque
 
-VERSION='4.7.0'
+VERSION='4.9.0'
 HOST=os.getenv('HOST','0.0.0.0'); PORT=int(os.getenv('PORT','8080'))
 USER=os.getenv('IPTV_USER','ogdemo'); PASSWORD=os.getenv('IPTV_PASSWORD','change-me-now')
 PUBLIC_URL=os.getenv('PUBLIC_URL','https://og-iptv.onrender.com').rstrip('/')
@@ -32,6 +32,7 @@ MOVIES_JSON_URLS=os.getenv('MOVIES_JSON_URLS','').strip()
 SERIES_JSON_URLS=os.getenv('SERIES_JSON_URLS','').strip()
 LICENSED_CATALOGS_URL=os.getenv('LICENSED_CATALOGS_URL','').strip()
 ARCHIVE_DISCOVERY=os.getenv('ARCHIVE_DISCOVERY','1')=='1'
+ADULT_ARCHIVE_DISCOVERY=os.getenv('ADULT_ARCHIVE_DISCOVERY','1')=='1'
 ARCHIVE_MAX=max(0,min(int(os.getenv('ARCHIVE_MAX','60')),500))
 PERSIAN_RESERVE_PERCENT=max(0,min(int(os.getenv('PERSIAN_RESERVE_PERCENT','55')),90))
 XTREAM_URL=os.getenv('XTREAM_URL','').rstrip('/')
@@ -292,9 +293,14 @@ def category_labels(item,kind):
     if item.get('recent'):labels.append(f'{kind} - RECENTLY ADDED')
     return list(dict.fromkeys(labels))
 
-def archive_items():
+def archive_items(adult_only=False, persian_only=False, series_only=False):
     if not ARCHIVE_DISCOVERY or not ARCHIVE_MAX:return []
     query='mediatype:movies AND (licenseurl:creativecommons.org/publicdomain/zero/* OR licenseurl:creativecommons.org/publicdomain/mark/*)'
+    if adult_only:query+=' AND (subject:adult OR subject:erotic OR title:adult OR title:erotic)'
+    if persian_only:
+        query+=' AND (language:per OR language:fas OR language:fa OR language:persian OR language:farsi OR subject:iranian OR subject:persian OR title:ایران OR title:فارسی)'
+    if series_only:
+        query+=' AND (subject:series OR subject:episode OR title:episode OR title:قسمت OR title:سریال)'
     params=urllib.parse.urlencode({'q':query,'fl[]':['identifier','title','language','year','subject'],
         'rows':str(ARCHIVE_MAX),'page':'1','output':'json'},doseq=True)
     docs=get_json('https://archive.org/advancedsearch.php?'+params,20).get('response',{}).get('docs',[])
@@ -314,7 +320,7 @@ def archive_items():
             'year':str(md.get('year') or doc.get('year') or ''),
             'poster':'https://archive.org/services/img/'+urllib.parse.quote(ident),
             'description':str(md.get('description') or '')[:1000],
-            'source':'Internet Archive public domain','license_url':lic}
+            'source':'Internet Archive public domain','license_url':lic,'adult':adult_only,'persian_discovered':persian_only}
     result=[]
     with ThreadPoolExecutor(max_workers=6) as pool:
         for future in as_completed([pool.submit(fetch_doc,d) for d in docs]):
@@ -350,7 +356,43 @@ def scan_vod():
     try:
         try:
             discovered=archive_items();movies.extend(discovered);sources['archive']=len(discovered)
+            if ADULT_ENABLED and ADULT_ARCHIVE_DISCOVERY:
+                adult_discovered=archive_items(adult_only=True)
+                movies.extend(adult_discovered)
+                sources['adult_archive_discovered']=len(adult_discovered)
         except Exception as exc:sources['archive_error']=str(exc)[:160]
+        # Public-domain Persian-language and Iranian film discovery.
+        # Only verified public-domain-marked archive files enter the catalog.
+        try:
+            persian_films=archive_items(persian_only=True)
+            movies.extend(persian_films)
+            sources['persian_archive_movies_discovered']=len(persian_films)
+        except Exception as exc:
+            sources['persian_archive_movies_error']=str(exc)[:160]
+        # Episodes require a verified season/episode structure; do not
+        # mislabel independent videos as complete television series.
+        try:
+            episode_candidates=archive_items(persian_only=True,series_only=True)
+            import re as _re
+            grouped={}
+            for episode in episode_candidates:
+                title=str(episode.get('title',''))
+                match=_re.search(r'(?i)^(.*?)\\s*(?:[-–:]\\s*)?(?:s(\\d{1,2})e(\\d{1,3})|season\\s*(\\d{1,2})\\s*episode\\s*(\\d{1,3})|فصل\\s*(\\d{1,2})\\s*قسمت\\s*(\\d{1,3}))',title)
+                if not match or not match.group(1).strip():continue
+                nums=[x for x in match.groups()[1:] if x is not None]
+                if len(nums)!=2:continue
+                name=match.group(1).strip()
+                key=name.casefold()
+                group=grouped.setdefault(key,{'title':name,'language':'fa','genre':'Iranian Persian series','poster':episode.get('poster',''),'seasons':{}})
+                season,number=map(int,nums)
+                group['seasons'].setdefault(season,[]).append({'number':number,'title':title,'url':episode['url']})
+            for group in grouped.values():
+                if sum(map(len,group['seasons'].values()))<2:continue
+                group['seasons']=[{'number':n,'episodes':sorted(eps,key=lambda x:x['number'])} for n,eps in sorted(group['seasons'].items())]
+                series.append(group)
+            sources['persian_archive_series_discovered']=sum(1 for g in grouped.values() if isinstance(g['seasons'],list))
+        except Exception as exc:
+            sources['persian_archive_series_error']=str(exc)[:160]
         try:feeds=licensed_catalog_feeds()
         except Exception as exc:
             feeds={'movies':[],'series':[],'adult_movies':[],'adult_series':[]}
