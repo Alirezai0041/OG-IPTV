@@ -1,18 +1,18 @@
 {
   "version": 3,
-  "candidates": 396,
-  "accepted_movies": 4,
+  "candidates": 395,
+  "accepted_movies": 3,
   "accepted_series_candidates": 0,
   "persian_movies": 0,
-  "french_movies": 4,
+  "french_movies": 3,
   "persian_series_candidates": 0,
   "french_series_candidates": 0,
   "counts": {
     "search_results": 400,
-    "license_not_eligible": 220,
-    "excluded_non_entertainment": 7,
-    "language_unverified": 165,
-    "movies": 4
+    "license_not_eligible": 231,
+    "excluded_non_entertainment": 8,
+    "language_unverified": 153,
+    "movies": 3
   },
   "note": "Metadata-based language and series classification only; dubbing, rights, playable links and episodes NOT independently verified. Do not distribute without review."
 }
